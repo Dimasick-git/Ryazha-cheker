@@ -556,7 +556,7 @@ class MessageBuilder:
         ]
 
         # ── Только репозитории с изменениями ───────────────────────
-        changed_repos = [r for r in repos_data if r.get("recent_commits")][:5]  # Максимум 5 репозиториев
+        changed_repos = [r for r in repos_data if r.get("recent_commits")][:5]
 
         if not changed_repos:
             return "<b>No recent activity found</b>"
@@ -564,9 +564,6 @@ class MessageBuilder:
         for repo in changed_repos:
             name = escape_html(repo["name"])
             desc = repo.get("description") or ""
-            stars = repo.get("stars", 0)
-            forks = repo.get("forks", 0)
-            lang = escape_html(repo.get("language") or "—")
 
             # Заголовок репозитория
             lines.append(f"<b>{name}.zip</b>")
@@ -574,8 +571,8 @@ class MessageBuilder:
             if desc and desc != "No description":
                 lines.append(f"{escape_html(truncate(desc, 80))}")
 
-            # Коммиты в формате коммит + сообщение
-            commits = repo.get("recent_commits", [])[:3]  # Только 3 коммита
+            # Коммиты
+            commits = repo.get("recent_commits", [])[:3]
             if commits:
                 lines.append("<h3>Modified files</h3>")
                 
@@ -586,33 +583,30 @@ class MessageBuilder:
                     date = fmt_date(c["date"])
                     url = c["html_url"]
                     
-                    # Формат: коммит + сообщение
                     lines.append(f"<a href=\"{url}\"><code>{sha}</code></a>")
                     lines.append(f"```")
                     lines.append(f"{msg}")
                     lines.append(f"```")
                     lines.append(f"Автор: {auth} | {date}")
                     
-                    # Измененные файлы (только если есть)
+                    # Измененные файлы
                     files = c.get("files", [])
                     if files:
                         lines.append("Измененные файлы:")
                         
-                        # Красивое дерево файлов
-                        tree = build_file_tree(files[:5])  # Показываем до 5 файлов
+                        # Дерево файлов
+                        tree = build_file_tree(files[:5])
                         if tree.strip():
                             lines.append(f"<pre><code>{tree}</code></pre>")
                         
                         # Ссылки на файлы
                         lines.append("Ссылки на файлы:")
-                        for f in files[:3]:  # Показываем до 3 файлов
+                        for f in files[:3]:
                             filename = escape_html(f["filename"])
                             changes = f.get("changes", 0)
                             additions = f.get("additions", 0)
                             deletions = f.get("deletions", 0)
                             
-                            # Прямая ссылка на файл в GitHub
-                            # Формат: https://github.com/username/repo/blob/branch/filepath
                             file_url = f"https://github.com/{c['html_url'].split('/')[3]}/{c['html_url'].split('/')[4]}/blob/main/{f['filename']}"
                             
                             if changes > 0:
@@ -622,7 +616,7 @@ class MessageBuilder:
                     
                     lines.append("")
 
-            # Релизы (только если есть)
+            # Релизы
             releases = repo.get("releases", [])
             if releases:
                 lines.append("<h3>Added files/folders</h3>")
@@ -637,12 +631,12 @@ class MessageBuilder:
                     lines.append(f"Автор: {author} | {date}")
                 lines.append("</pre>")
 
-            # PRs (только если есть)
+            # PRs
             prs = repo.get("open_prs", [])
             if prs:
                 lines.append("<h3>Removed files/folders</h3>")
                 lines.append("<pre>")
-                for pr in prs[:2]:  # Только 2 PR
+                for pr in prs[:2]:
                     num = pr["number"]
                     title = escape_html(pr["title"])
                     author = escape_html(pr["author"])
@@ -686,64 +680,64 @@ class GitHubMonitor:
         )
 
     def run(self):
-        print(f"🚀 Запуск GitHub монитора для: {self.username}")
-        print(f"   Время: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        print(f"Запуск GitHub монитора для: {self.username}")
+        print(f"Время: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
         print()
 
-        # ── Проверка новых релизов ───────────────────────────────
-        print("0️⃣  Проверка новых релизов...")
+        # Проверка новых релизов
+        print("Проверка новых релизов...")
         latest_update = check_for_new_releases(self.username)
         last_check = load_last_check_date()
         
         if latest_update and last_check and latest_update == last_check:
-            print(f"⚠️  Новых релизов не найдено. Последнее обновление: {latest_update}")
-            print("   Мониторинг не требуется. Выход.")
+            print(f"Новых релизов не найдено. Последнее обновление: {latest_update}")
+            print("Мониторинг не требуется. Выход.")
             return
         
         if latest_update:
-            print(f"✅ Обнаружены новые изменения! Последнее обновление: {latest_update}")
+            print(f"Обнаружены новые изменения! Последнее обновление: {latest_update}")
             if last_check:
-                print(f"   Предыдущая проверка: {last_check}")
+                print(f"Предыдущая проверка: {last_check}")
             else:
-                print("   Первая проверка")
+                print("Первая проверка")
 
-        # ── Валидируем Telegram бота ───────────────────────────
+        # Валидируем Telegram бота
         print()
-        print("1️⃣  Проверка Telegram бота...")
+        print("Проверка Telegram бота...")
         if not self.telegram.validate():
-            print("❌ Неверный токен Telegram. Выход.")
+            print("Неверный токен Telegram. Выход.")
             sys.exit(1)
 
-        # ── Получаем репозитории ───────────────────────────────
+        # Получаем репозитории
         print()
-        print("2️⃣  Получение репозиториев...")
+        print("Получение репозиториев...")
         repositories = self.github.get_repositories()
 
         if not repositories:
-            print("⚠️  Репозитории не найдены или ошибка API")
+            print("Репозитории не найдены или ошибка API")
             self.telegram.send(
-                f"⚠️ <b>GitHub Monitor</b>\n"
+                f"<b>GitHub Monitor</b>\n"
                 f"Репозитории не найдены для <code>{escape_html(self.username)}</code>\n"
                 f"Проверьте права G_TOKEN."
             )
             sys.exit(0)
 
-        print(f"   Найдено репозиториев: {len(repositories)}")
+        print(f"Найдено репозиториев: {len(repositories)}")
 
-        # ── Собираем детальную информацию ─────────────────────
+        # Собираем детальную информацию
         print()
-        print("3️⃣  Сбор информации о репозиториях...")
+        print("Сбор информации о репозиториях...")
         repos_data = []
         has_real_changes = False
 
         for i, repo in enumerate(repositories, 1):
             name = repo["name"]
-            print(f"   [{i:2d}/{len(repositories)}] {name}", end="", flush=True)
+            print(f"[{i:2d}/{len(repositories)}] {name}", end="", flush=True)
 
             # Загружаем предыдущее состояние
             old_state = load_repository_state(self.username, name)
             
-            # Базовые данные из списка (без доп. запроса)
+            # Базовые данные из списка
             info: Dict[str, Any] = {
                 "name":        name,
                 "description": repo.get("description") or "",
@@ -785,29 +779,21 @@ class GitHubMonitor:
             
             if has_changes:
                 has_real_changes = True
-                print(" 🔄")
+                print(" [ИЗМЕНЕНО]")
                 # Сохраняем новое состояние
                 save_repository_state(self.username, name, {
                     "recent_commits": commits,
                     "last_check": datetime.now(timezone.utc).isoformat()
                 })
             else:
-                print(" ⏸️")  # Нет изменений
-
-            flag = ""
-            if commits: flag += " 📝"
-            if prs:     flag += f" 🔄{len(prs)}"
-            if releases: flag += f" 🚀{len(releases)}"
-            if workflows: flag += f" ⚙️{len(workflows)}"
-            if has_changes: flag += " ✨"  # Новые изменения
-            print(flag)
+                print(" [без изменений]")
 
             repos_data.append(info)
 
         if not has_real_changes:
             print()
-            print("⚠️  Реальных изменений в содержимом не найдено.")
-            print("   Мониторинг не требуется. Выход.")
+            print("Реальных изменений в содержимом не найдено.")
+            print("Мониторинг не требуется. Выход.")
             return
 
         # Сортируем по свежести
@@ -816,27 +802,27 @@ class GitHubMonitor:
             reverse=True,
         )
 
-        # ── Формируем и отправляем сообщение ──────────────────
+        # Формируем и отправляем сообщение
         print()
-        print("4️⃣  Формирование сообщения...")
+        print("Формирование сообщения...")
         message = MessageBuilder.build(self.username, repos_data)
-        print(f"   Длина сообщения: {len(message)} символов")
+        print(f"Длина сообщения: {len(message)} символов")
 
         print()
-        print("5️⃣  Отправка в Telegram...")
+        print("Отправка в Telegram...")
         success = self.telegram.send(message)
 
         print()
         if success:
-            print("✅ Мониторинг успешно завершен")
+            print("Мониторинг успешно завершен")
             # Сохраняем дату последней успешной проверки
             if latest_update:
                 save_last_check_date(latest_update)
         else:
-            print("❌ Мониторинг завершен с ошибками отправки")
+            print("Мониторинг завершен с ошибками отправки")
             # Пробуем отправить аварийное сообщение
             self.telegram.send(
-                "⚠️ <b>GitHub Monitor</b>\n"
+                "<b>GitHub Monitor</b>\n"
                 "Отчет сформирован, но некоторые части не отправлены.\n"
                 "Проверьте логи Actions для деталей."
             )
