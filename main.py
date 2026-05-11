@@ -20,9 +20,11 @@ GITHUB_API         = "https://api.github.com"
 TELEGRAM_API       = "https://api.telegram.org"
 
 # Сколько репо/коммитов показывать
-MAX_ACTIVE_REPOS   = 5
-MAX_COMMITS        = 2
+MAX_ACTIVE_REPOS   = 10  # Показываем все репозитории
+MAX_COMMITS        = 3
 MAX_PRS            = 3
+MAX_RELEASES       = 2
+MAX_WORKFLOWS      = 3
 MAX_REPOS_WITH_PRS = 3
 
 # Задержка между запросами к GitHub API (rate limit protection)
@@ -160,6 +162,52 @@ class GitHubClient:
                     "title":  truncate(pr["title"], 55),
                     "author": pr["user"]["login"],
                     "date":   pr["created_at"],
+                })
+            except (KeyError, TypeError):
+                continue
+        return result
+
+    def get_releases(self, repo: str, count: int = 3) -> List[Dict]:
+        """Последние релизы репозитория."""
+        data = self._get(
+            f"{GITHUB_API}/repos/{self.username}/{repo}/releases",
+            params={"per_page": count},
+        )
+        if not data or not isinstance(data, list):
+            return []
+
+        result = []
+        for release in data[:count]:
+            try:
+                result.append({
+                    "tag":         release["tag_name"],
+                    "name":        truncate(release.get("name") or release["tag_name"], 50),
+                    "author":      release["author"]["login"] if release.get("author") else "Unknown",
+                    "published_at": release["published_at"],
+                    "html_url":    release["html_url"],
+                })
+            except (KeyError, TypeError):
+                continue
+        return result
+
+    def get_workflow_runs(self, repo: str, count: int = 5) -> List[Dict]:
+        """Последние workflow runs репозитория."""
+        data = self._get(
+            f"{GITHUB_API}/repos/{self.username}/{repo}/actions/runs",
+            params={"per_page": count},
+        )
+        if not data or not isinstance(data, dict) or "workflow_runs" not in data:
+            return []
+
+        result = []
+        for run in data["workflow_runs"][:count]:
+            try:
+                result.append({
+                    "name":         truncate(run["name"], 40),
+                    "status":       run["status"],
+                    "conclusion":   run.get("conclusion", "running"),
+                    "created_at":   run["created_at"],
+                    "html_url":     run["html_url"],
                 })
             except (KeyError, TypeError):
                 continue
@@ -312,9 +360,9 @@ class MessageBuilder:
         # ── Заголовок ──────────────────────────────────────────
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         lines += [
-            "🔍 <b>GitHub Repository Monitor</b>",
-            f"👤 User: <code>{escape_html(username)}</code>",
-            f"📅 {now}",
+            "<b>Мониторинг репозиториев GitHub</b>",
+            f"Пользователь: <code>{escape_html(username)}</code>",
+            f"Время: {now}",
             "",
         ]
 
@@ -324,10 +372,10 @@ class MessageBuilder:
         total_forks = sum(r.get("forks", 0) for r in repos_data)
 
         lines += [
-            "📊 <b>Summary</b>",
-            f"• Repositories: <b>{total_repos}</b>",
-            f"• ⭐ Stars: <b>{total_stars}</b>",
-            f"• 🍴 Forks: <b>{total_forks}</b>",
+            "<b>Общая статистика</b>",
+            f"Всего репозиториев: <b>{total_repos}</b>",
+            f"Звезд: <b>{total_stars}</b>",
+            f"Форков: <b>{total_forks}</b>",
             "",
         ]
 
@@ -335,7 +383,7 @@ class MessageBuilder:
         active = [r for r in repos_data if r.get("recent_commits")][:MAX_ACTIVE_REPOS]
 
         if active:
-            lines.append("🚀 <b>Recently Active Repositories</b>")
+            lines.append("<b>Активные репозитории</b>")
             lines.append("")
 
             for repo in active:
@@ -345,32 +393,63 @@ class MessageBuilder:
                 stars = repo.get("stars", 0)
                 forks = repo.get("forks", 0)
 
-                lines.append(f"📁 <b>{name}</b>")
+                lines.append(f"<b>{name}</b>")
 
                 if desc and desc != "No description":
-                    lines.append(f"📝 {escape_html(truncate(desc, 80))}")
+                    lines.append(f"{escape_html(truncate(desc, 80))}")
 
                 lines.append(
-                    f"⭐ {stars}  🍴 {forks}  💻 {lang}"
-                    + ("  🔒 Private" if repo.get("private") else "")
+                    f"Звезд: {stars} | Форков: {forks} | Язык: {lang}"
+                    + (" | Приватный" if repo.get("private") else "")
                 )
 
                 # Коммиты
                 commits = repo.get("recent_commits", [])[:MAX_COMMITS]
                 if commits:
-                    lines.append("📝 Recent commits:")
+                    lines.append("Последние коммиты:")
                     for c in commits:
                         sha  = escape_html(c["sha"])
                         msg  = escape_html(c["message"])
                         auth = escape_html(c["author"])
                         date = fmt_date(c["date"])
-                        lines.append(f"  • <code>{sha}</code> {msg}")
-                        lines.append(f"    by {auth} · {date}")
+                        lines.append(f"<code>{sha}</code>")
+                        lines.append(f"{msg}")
+                        lines.append(f"Автор: {auth} | {date}")
+                        lines.append("")
+
+                # Релизы
+                releases = repo.get("releases", [])[:MAX_RELEASES]
+                if releases:
+                    lines.append(f"Релизы: {len(releases)}")
+                    for rel in releases:
+                        tag = escape_html(rel["tag"])
+                        name = escape_html(rel["name"])
+                        author = escape_html(rel["author"])
+                        date = fmt_date(rel["published_at"])
+                        url = rel["html_url"]
+                        lines.append(f"<a href=\"{url}\">{tag}</a> - {name}")
+                        lines.append(f"Автор: {author} | {date}")
+                    lines.append("")
 
                 # Open PRs
                 prs = repo.get("open_prs", [])
                 if prs:
-                    lines.append(f"🔄 Open PRs: {len(prs)}")
+                    lines.append(f"Открытые PR: {len(prs)}")
+
+                # Workflow runs
+                workflows = repo.get("workflow_runs", [])[:MAX_WORKFLOWS]
+                if workflows:
+                    lines.append(f"Последние workflow: {len(workflows)}")
+                    for wf in workflows:
+                        name = escape_html(wf["name"])
+                        status = wf["status"]
+                        conclusion = wf.get("conclusion", "running")
+                        date = fmt_date(wf["created_at"])
+                        url = wf["html_url"]
+                        status_icon = "✅" if conclusion == "success" else "❌" if conclusion == "failure" else "⏳"
+                        lines.append(f"{status_icon} <a href=\"{url}\">{name}</a> - {conclusion}")
+                        lines.append(f"Статус: {status} | {date}")
+                    lines.append("")
 
                 lines.append("")
 
@@ -378,32 +457,32 @@ class MessageBuilder:
         repos_with_prs = [r for r in repos_data if r.get("open_prs")][:MAX_REPOS_WITH_PRS]
 
         if repos_with_prs:
-            lines.append("🔄 <b>Open Pull Requests</b>")
+            lines.append("<b>Открытые Pull Requests</b>")
             lines.append("")
 
             for repo in repos_with_prs:
                 name = escape_html(repo["name"])
                 prs  = repo["open_prs"][:MAX_PRS]
-                lines.append(f"📁 <b>{name}</b> — {len(prs)} open PR(s):")
+                lines.append(f"<b>{name}</b> — {len(prs)} открытых PR:")
 
                 for pr in prs:
                     num    = pr["number"]
                     title  = escape_html(pr["title"])
                     author = escape_html(pr["author"])
                     date   = fmt_date(pr["date"])
-                    lines.append(f"  • #{num} {title}")
-                    lines.append(f"    by {author} · {date}")
+                    lines.append(f"#{num} {title}")
+                    lines.append(f"Автор: {author} | {date}")
 
                 lines.append("")
 
         # ── Нет активности ──────────────────────────────────────
         if not active and not repos_with_prs:
-            lines.append("😴 No recent activity found.")
+            lines.append("Недавней активности не найдено.")
             lines.append("")
 
         lines.append("—")
         lines.append(
-            f"<i>GitHub Monitor · Run #{os.getenv('GITHUB_RUN_NUMBER', '?')}</i>"
+            f"<i>GitHub Monitor · Запуск #{os.getenv('GITHUB_RUN_NUMBER', '?')}</i>"
         )
 
         return "\n".join(lines)
@@ -482,21 +561,35 @@ class GitHubMonitor:
                 "private":     repo.get("private", False),
                 "recent_commits": [],
                 "open_prs":       [],
+                "releases":       [],
+                "workflow_runs":  [],
             }
 
             # Коммиты
-            commits = self.github.get_recent_commits(name, count=3)
+            commits = self.github.get_recent_commits(name, count=MAX_COMMITS)
             info["recent_commits"] = commits
             time.sleep(API_DELAY)
 
             # PRs
-            prs = self.github.get_open_prs(name, count=3)
+            prs = self.github.get_open_prs(name, count=MAX_PRS)
             info["open_prs"] = prs
+            time.sleep(API_DELAY)
+
+            # Релизы
+            releases = self.github.get_releases(name, count=MAX_RELEASES)
+            info["releases"] = releases
+            time.sleep(API_DELAY)
+
+            # Workflow runs
+            workflows = self.github.get_workflow_runs(name, count=MAX_WORKFLOWS)
+            info["workflow_runs"] = workflows
             time.sleep(API_DELAY)
 
             flag = ""
             if commits: flag += " 📝"
             if prs:     flag += f" 🔄{len(prs)}"
+            if releases: flag += f" 🚀{len(releases)}"
+            if workflows: flag += f" ⚙️{len(workflows)}"
             print(flag)
 
             repos_data.append(info)
