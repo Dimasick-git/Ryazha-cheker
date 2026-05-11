@@ -12,6 +12,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
+from urllib.parse import quote
 
 
 # ──────────────────────────────────────────────────────────────
@@ -47,6 +48,33 @@ def escape_html(text: str) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
+
+
+def html_code_block(text: str) -> str:
+    """Возвращает настоящий блок кода для Telegram HTML parse_mode.
+
+    В HTML-режиме Telegram не обрабатывает Markdown-синтаксис с ```.
+    Поэтому тройные обратные кавычки отображались как обычный текст.
+    Поддерживаемый Telegram вариант для многострочного кода — тег <pre>.
+    """
+    return f"<pre>{escape_html(text)}</pre>"
+
+
+def build_github_file_url(commit_url: str, filename: str, file_info: Dict[str, Any]) -> str:
+    """Строит рабочую ссылку на файл, изменённый конкретным коммитом."""
+    direct_url = file_info.get("blob_url") or file_info.get("raw_url")
+    if direct_url:
+        return direct_url
+
+    parts = commit_url.split("/")
+    if len(parts) >= 7:
+        owner = quote(parts[3], safe="")
+        repo = quote(parts[4], safe="")
+        sha = quote(parts[-1], safe="")
+        path = quote(filename, safe="/")
+        return f"https://github.com/{owner}/{repo}/blob/{sha}/{path}"
+
+    return commit_url
 
 
 def fmt_date(iso: str) -> str:
@@ -202,7 +230,7 @@ def build_file_tree(files: List[Dict]) -> str:
             changes = f.get("changes", 0)
             additions = f.get("additions", 0)
             deletions = f.get("deletions", 0)
-            filename = escape_html(f["filename"])
+            filename = f["filename"]
             
             if changes > 0:
                 tree_lines.append(f"├─ {filename} (+{additions}/-{deletions})")
@@ -217,7 +245,7 @@ def build_file_tree(files: List[Dict]) -> str:
             changes = f.get("changes", 0)
             additions = f.get("additions", 0)
             deletions = f.get("deletions", 0)
-            filename = escape_html(f["filename"])
+            filename = f["filename"]
             
             # Вычисляем относительный путь
             rel_path = filename.replace(f"{folder_name}/", "", 1)
@@ -324,6 +352,9 @@ class GitHubClient:
                             "changes": f.get("changes", 0),
                             "additions": f.get("additions", 0),
                             "deletions": f.get("deletions", 0),
+                            "status": f.get("status", "modified"),
+                            "blob_url": f.get("blob_url"),
+                            "raw_url": f.get("raw_url"),
                             "patch": f.get("patch", "")[:200]  # Обрезаем патч
                         })
                 
@@ -551,8 +582,9 @@ class MessageBuilder:
         # ── Заголовок ──────────────────────────────────────────
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         lines += [
-            f"<h2>Archive Comparison Report for <b>{escape_html(username)}</b></h2>",
-            f"<b>Last archive modification date:</b> {now}<hr>",
+            f"<b>Archive Comparison Report for {escape_html(username)}</b>",
+            f"<b>Last archive modification date:</b> {now}",
+            "────────────────────",
         ]
 
         # ── Только репозитории с изменениями ───────────────────────
@@ -574,19 +606,17 @@ class MessageBuilder:
             # Коммиты
             commits = repo.get("recent_commits", [])[:3]
             if commits:
-                lines.append("<h3>Modified files</h3>")
+                lines.append("<b>Modified files</b>")
                 
                 for c in commits:
                     sha = escape_html(c["sha"])
-                    msg = escape_html(c["message"])
+                    msg = c["message"]
                     auth = escape_html(c["author"])
                     date = fmt_date(c["date"])
                     url = c["html_url"]
                     
-                    lines.append(f"<a href=\"{url}\"><code>{sha}</code></a>")
-                    lines.append(f"```")
-                    lines.append(f"{msg}")
-                    lines.append(f"```")
+                    lines.append(f"<a href=\"{escape_html(url)}\"><code>{sha}</code></a>")
+                    lines.append(html_code_block(msg))
                     lines.append(f"Автор: {auth} | {date}")
                     
                     # Измененные файлы
@@ -597,9 +627,7 @@ class MessageBuilder:
                         # Дерево файлов
                         tree = build_file_tree(files[:5])
                         if tree.strip():
-                            lines.append(f"```")
-                            lines.append(f"{tree}")
-                            lines.append(f"```")
+                            lines.append(html_code_block(tree))
                         
                         # Ссылки на файлы
                         lines.append("Ссылки на файлы:")
@@ -609,7 +637,7 @@ class MessageBuilder:
                             additions = f.get("additions", 0)
                             deletions = f.get("deletions", 0)
                             
-                            file_url = f"https://github.com/{c['html_url'].split('/')[3]}/{c['html_url'].split('/')[4]}/blob/main/{f['filename']}"
+                            file_url = escape_html(build_github_file_url(c["html_url"], f["filename"], f))
                             
                             if changes > 0:
                                 lines.append(f"• <a href=\"{file_url}\">{filename}</a> (+{additions}/-{deletions})")
@@ -621,33 +649,32 @@ class MessageBuilder:
             # Релизы
             releases = repo.get("releases", [])
             if releases:
-                lines.append("<h3>Added files/folders</h3>")
-                lines.append(f"```")
+                lines.append("<b>Added files/folders</b>")
+                release_lines = []
                 for rel in releases:
-                    tag = escape_html(rel["tag"])
-                    name = escape_html(rel["name"])
-                    author = escape_html(rel["author"])
+                    tag = rel["tag"]
+                    name = rel["name"]
+                    author = rel["author"]
                     date = fmt_date(rel["published_at"])
-                    url = rel["html_url"]
-                    lines.append(f"<a href=\"{url}\">{tag}</a> - {name}")
-                    lines.append(f"Автор: {author} | {date}")
-                lines.append(f"```")
+                    release_lines.append(f"{tag} - {name}")
+                    release_lines.append(f"Автор: {author} | {date}")
+                lines.append(html_code_block("\n".join(release_lines)))
 
             # PRs
             prs = repo.get("open_prs", [])
             if prs:
-                lines.append("<h3>Removed files/folders</h3>")
-                lines.append(f"```")
+                lines.append("<b>Removed files/folders</b>")
+                pr_lines = []
                 for pr in prs[:2]:
                     num = pr["number"]
-                    title = escape_html(pr["title"])
-                    author = escape_html(pr["author"])
+                    title = pr["title"]
+                    author = pr["author"]
                     date = fmt_date(pr["date"])
-                    lines.append(f"#{num} {title}")
-                    lines.append(f"Автор: {author} | {date}")
-                lines.append(f"```")
+                    pr_lines.append(f"#{num} {title}")
+                    pr_lines.append(f"Автор: {author} | {date}")
+                lines.append(html_code_block("\n".join(pr_lines)))
 
-            lines.append("<hr>\n\n")
+            lines.append("────────────────────\n")
 
         return "\n".join(lines)
 
