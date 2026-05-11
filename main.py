@@ -160,7 +160,24 @@ class GitHubMonitor:
         return message
     
     def send_telegram_message(self, message: str) -> bool:
-        """Отправляет сообщение в Telegram"""
+        """Отправляет сообщение в Telegram с fallback методами"""
+        
+        # Метод 1: С Markdown
+        if self._send_with_markdown(message):
+            return True
+            
+        # Метод 2: Без Markdown (fallback)
+        print("Trying fallback without Markdown...")
+        if self._send_plain_text(message):
+            return True
+            
+        # Метод 3: Упрощенное сообщение (fallback)
+        print("Trying simplified message...")
+        simple_message = f"GitHub Monitor Report for {self.github_username} - {len(message)} chars generated"
+        return self._send_plain_text(simple_message)
+    
+    def _send_with_markdown(self, message: str) -> bool:
+        """Отправка сообщения с Markdown форматированием"""
         url = f"https://api.telegram.org/bot{self.telegram_bot_token}/sendMessage"
         
         data = {
@@ -169,10 +186,28 @@ class GitHubMonitor:
             'parse_mode': 'Markdown'
         }
         
+        return self._make_request(url, data)
+    
+    def _send_plain_text(self, message: str) -> bool:
+        """Отправка простого текстового сообщения"""
+        url = f"https://api.telegram.org/bot{self.telegram_bot_token}/sendMessage"
+        
+        # Очищаем сообщение от Markdown символов
+        clean_message = message.replace('*', '').replace('_', '').replace('`', '').replace('#', '')
+        
+        data = {
+            'chat_id': self.telegram_chat_id,
+            'text': clean_message
+        }
+        
+        return self._make_request(url, data)
+    
+    def _make_request(self, url: str, data: dict) -> bool:
+        """Выполняет HTTP запрос к Telegram API"""
         try:
             print(f"Sending message to chat_id: {self.telegram_chat_id}")
             print(f"Bot token: {self.telegram_bot_token[:10]}...")
-            print(f"Message length: {len(message)} characters")
+            print(f"Message length: {len(data['text'])} characters")
             
             response = requests.post(url, json=data, timeout=30)
             
