@@ -60,6 +60,71 @@ def truncate(text: str, max_len: int = 60) -> str:
     return text if len(text) <= max_len else text[: max_len - 1] + "…"
 
 
+def build_file_tree(files: List[Dict]) -> str:
+    """Строит красивое дерево файлов."""
+    if not files:
+        return ""
+    
+    tree_lines = []
+    
+    # Группируем файлы по папкам
+    folders = {}
+    root_files = []
+    
+    for f in files:
+        path = f["filename"]
+        parts = path.split("/")
+        
+        if len(parts) == 1:
+            # Файл в корне
+            root_files.append(f)
+        else:
+            # Файл в подпапке
+            folder = parts[0]
+            if folder not in folders:
+                folders[folder] = []
+            folders[folder].append(f)
+    
+    # Добавляем корневые файлы
+    if root_files:
+        for f in root_files:
+            changes = f.get("changes", 0)
+            additions = f.get("additions", 0)
+            deletions = f.get("deletions", 0)
+            filename = escape_html(f["filename"])
+            
+            if changes > 0:
+                tree_lines.append(f"├─ {filename} (+{additions}/-{deletions})")
+            else:
+                tree_lines.append(f"├─ {filename}")
+    
+    # Добавляем папки
+    for folder_name, folder_files in sorted(folders.items()):
+        tree_lines.append(f"├─ {folder_name}/")
+        
+        for i, f in enumerate(folder_files):
+            changes = f.get("changes", 0)
+            additions = f.get("additions", 0)
+            deletions = f.get("deletions", 0)
+            filename = escape_html(f["filename"])
+            
+            # Вычисляем относительный путь
+            rel_path = filename.replace(f"{folder_name}/", "", 1)
+            
+            # Определяем префикс (├─ или └─)
+            if i == len(folder_files) - 1 and not root_files:
+                prefix = "└─"
+            else:
+                prefix = "│  ├─"
+            
+            if changes > 0:
+                tree_lines.append(f"{prefix} {rel_path} (+{additions}/-{deletions})")
+            else:
+                tree_lines.append(f"{prefix} {rel_path}")
+    
+    return "\n".join(tree_lines)
+
+
 # ──────────────────────────────────────────────────────────────
 # GITHUB CLIENT
 # ──────────────────────────────────────────────────────────────
@@ -438,7 +503,19 @@ class MessageBuilder:
                         files = c.get("files", [])
                         if files:
                             lines.append("Измененные файлы:")
-                            for f in files[:3]:  # Показываем до 3 файлов
+                            
+                            # Добавляем дату модификации
+                            commit_date = fmt_date(c["date"])
+                            lines.append(f"Last archive modification date: {commit_date}")
+                            lines.append("")
+                            
+                            # Строим дерево файлов
+                            tree = build_file_tree(files)
+                            lines.append(f"```{tree}```")
+                            
+                            # Добавляем кликабельные ссылки
+                            lines.append("Ссылки на файлы:")
+                            for f in files[:5]:  # Показываем до 5 файлов
                                 filename = escape_html(f["filename"])
                                 changes = f.get("changes", 0)
                                 additions = f.get("additions", 0)
