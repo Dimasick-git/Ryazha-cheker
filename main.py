@@ -1,276 +1,550 @@
 #!/usr/bin/env python3
 """
 GitHub Repository Monitor
-Отслеживает состояние всех репозиториев пользователя и отправляет уведомления в Telegram
+Отслеживает репозитории пользователя и отправляет уведомления в Telegram
 """
 
 import os
+import sys
+import time
 import requests
-import json
 from datetime import datetime, timezone
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
+
+# ──────────────────────────────────────────────────────────────
+# CONSTANTS
+# ──────────────────────────────────────────────────────────────
+TELEGRAM_MAX_LENGTH = 4096
+GITHUB_API         = "https://api.github.com"
+TELEGRAM_API       = "https://api.telegram.org"
+
+# Сколько репо/коммитов показывать
+MAX_ACTIVE_REPOS   = 5
+MAX_COMMITS        = 2
+MAX_PRS            = 3
+MAX_REPOS_WITH_PRS = 3
+
+# Задержка между запросами к GitHub API (rate limit protection)
+API_DELAY          = 0.5   # секунд
+
+
+# ──────────────────────────────────────────────────────────────
+# HELPERS
+# ──────────────────────────────────────────────────────────────
+def escape_html(text: str) -> str:
+    """Экранирует спецсимволы для HTML parse_mode."""
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def fmt_date(iso: str) -> str:
+    """ISO 8601 → читаемая дата UTC."""
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return iso[:16]
+
+
+def truncate(text: str, max_len: int = 60) -> str:
+    """Обрезает строку с многоточием."""
+    text = str(text)
+    return text if len(text) <= max_len else text[: max_len - 1] + "…"
+
+
+# ──────────────────────────────────────────────────────────────
+# GITHUB CLIENT
+# ──────────────────────────────────────────────────────────────
+class GitHubClient:
+    def __init__(self, token: str, username: str):
+        self.username = username
+        self.session  = requests.Session()
+        self.session.headers.update({
+            "Authorization": f"token {token}",
+            "Accept":        "application/vnd.github.v3+json",
+            "User-Agent":    f"GitHubMonitor/{username}",
+        })
+
+    def _get(self, url: str, params: dict = None) -> Optional[Any]:
+        """GET запрос с обработкой rate limit и ошибок."""
+        try:
+            resp = self.session.get(url, params=params, timeout=20)
+
+            # Rate limit
+            if resp.status_code == 429 or (
+                resp.status_code == 403
+                and "rate limit" in resp.text.lower()
+            ):
+                reset_ts = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
+                wait     = max(reset_ts - int(time.time()), 5)
+                print(f"⚠️  Rate limit hit. Waiting {wait}s...")
+                time.sleep(wait)
+                resp = self.session.get(url, params=params, timeout=20)
+
+            if resp.status_code == 200:
+                return resp.json()
+
+            print(f"❌ GitHub API {resp.status_code}: {url}")
+            print(f"   Response: {resp.text[:200]}")
+            return None
+
+        except requests.exceptions.Timeout:
+            print(f"⏱️  Timeout: {url}")
+            return None
+        except requests.exceptions.RequestException as e:
+            print(f"🌐 Network error: {e}")
+            return None
+
+    def get_repositories(self) -> List[Dict]:
+        """Все репозитории пользователя (пагинация)."""
+        all_repos = []
+        page      = 1
+
+        while True:
+            data = self._get(
+                f"{GITHUB_API}/users/{self.username}/repos",
+                params={"page": page, "per_page": 100, "type": "all"},
+            )
+            if not data:
+                break
+            all_repos.extend(data)
+            if len(data) < 100:
+                break
+            page += 1
+            time.sleep(API_DELAY)
+
+        return all_repos
+
+    def get_recent_commits(self, repo: str, count: int = 3) -> List[Dict]:
+        """Последние N коммитов репозитория."""
+        data = self._get(
+            f"{GITHUB_API}/repos/{self.username}/{repo}/commits",
+            params={"per_page": count},
+        )
+        if not data or not isinstance(data, list):
+            return []
+
+        result = []
+        for c in data[:count]:
+            try:
+                result.append({
+                    "sha":     c["sha"][:7],
+                    "message": truncate(c["commit"]["message"].split("\n")[0], 60),
+                    "author":  truncate(c["commit"]["author"]["name"], 25),
+                    "date":    c["commit"]["author"]["date"],
+                })
+            except (KeyError, TypeError):
+                continue
+        return result
+
+    def get_open_prs(self, repo: str, count: int = 3) -> List[Dict]:
+        """Открытые PR репозитория."""
+        data = self._get(
+            f"{GITHUB_API}/repos/{self.username}/{repo}/pulls",
+            params={"state": "open", "per_page": count},
+        )
+        if not data or not isinstance(data, list):
+            return []
+
+        result = []
+        for pr in data[:count]:
+            try:
+                result.append({
+                    "number": pr["number"],
+                    "title":  truncate(pr["title"], 55),
+                    "author": pr["user"]["login"],
+                    "date":   pr["created_at"],
+                })
+            except (KeyError, TypeError):
+                continue
+        return result
+
+
+# ──────────────────────────────────────────────────────────────
+# TELEGRAM CLIENT
+# ──────────────────────────────────────────────────────────────
+class TelegramClient:
+    def __init__(self, token: str, chat_id: str):
+        self.token   = token
+        self.chat_id = chat_id
+        self.base    = f"{TELEGRAM_API}/bot{token}"
+        self.session = requests.Session()
+
+    def validate(self) -> bool:
+        """Проверяет токен через getMe."""
+        try:
+            resp = self.session.get(
+                f"{self.base}/getMe", timeout=15
+            )
+            data = resp.json()
+            if data.get("ok"):
+                bot = data["result"]
+                print(f"✅ Bot: @{bot['username']} (id={bot['id']})")
+                return True
+            print(f"❌ getMe failed: {data.get('description')}")
+            return False
+        except Exception as e:
+            print(f"❌ getMe exception: {e}")
+            return False
+
+    def send(self, text: str, parse_mode: str = "HTML") -> bool:
+        """
+        Отправляет сообщение.
+        Автоматически разбивает на части если > 4096 символов.
+        """
+        parts = self._split(text)
+        print(f"📤 Sending {len(parts)} part(s) to chat {self.chat_id}")
+
+        all_ok = True
+        for i, part in enumerate(parts, 1):
+            ok = self._send_part(part, parse_mode)
+            if ok:
+                print(f"  ✅ Part {i}/{len(parts)} sent ({len(part)} chars)")
+            else:
+                print(f"  ❌ Part {i}/{len(parts)} failed — trying plain text")
+                # Fallback: убираем HTML теги и шлём plain
+                plain = self._strip_html(part)
+                ok    = self._send_part(plain, parse_mode=None)
+                if ok:
+                    print(f"  ✅ Part {i}/{len(parts)} sent as plain text")
+                else:
+                    print(f"  ❌ Part {i}/{len(parts)} failed completely")
+                    all_ok = False
+
+            if i < len(parts):
+                time.sleep(0.5)   # не флудим
+
+        return all_ok
+
+    def _send_part(self, text: str, parse_mode: Optional[str]) -> bool:
+        """Отправляет одну часть сообщения."""
+        payload: Dict[str, Any] = {
+            "chat_id": self.chat_id,
+            "text":    text,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+
+        try:
+            resp = self.session.post(
+                f"{self.base}/sendMessage",
+                json=payload,
+                timeout=30,
+            )
+            data = resp.json()
+
+            if data.get("ok"):
+                return True
+
+            desc = data.get("description", "unknown error")
+            print(f"  ⚠️  Telegram error: {desc}")
+
+            # Подсказки
+            if "chat not found" in desc.lower():
+                print("  💡 Fix: send /start to the bot first, or check CHAT_ID")
+            elif "blocked" in desc.lower():
+                print("  💡 Fix: user blocked the bot — unblock it in Telegram")
+            elif "parse" in desc.lower():
+                print("  💡 Fix: HTML parse error — will retry as plain text")
+
+            return False
+
+        except requests.exceptions.Timeout:
+            print("  ⏱️  Telegram timeout")
+            return False
+        except Exception as e:
+            print(f"  ❌ Telegram exception: {e}")
+            return False
+
+    @staticmethod
+    def _split(text: str, limit: int = TELEGRAM_MAX_LENGTH) -> List[str]:
+        """
+        Разбивает текст на части ≤ limit символов.
+        Старается резать по строкам а не по середине слова.
+        """
+        if len(text) <= limit:
+            return [text]
+
+        parts = []
+        while text:
+            if len(text) <= limit:
+                parts.append(text)
+                break
+            # Ищем последний перенос строки в допустимом диапазоне
+            cut = text.rfind("\n", 0, limit)
+            if cut == -1:
+                cut = limit
+            parts.append(text[:cut])
+            text = text[cut:].lstrip("\n")
+
+        return parts
+
+    @staticmethod
+    def _strip_html(text: str) -> str:
+        """Убирает HTML теги для plain text fallback."""
+        import re
+        clean = re.sub(r"<[^>]+>", "", text)
+        return (
+            clean
+            .replace("&amp;",  "&")
+            .replace("&lt;",   "<")
+            .replace("&gt;",   ">")
+            .replace("&quot;", '"')
+        )
+
+
+# ──────────────────────────────────────────────────────────────
+# MESSAGE BUILDER
+# ──────────────────────────────────────────────────────────────
+class MessageBuilder:
+    """Строит HTML сообщение для Telegram."""
+
+    @staticmethod
+    def build(username: str, repos_data: List[Dict]) -> str:
+        lines = []
+
+        # ── Заголовок ──────────────────────────────────────────
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        lines += [
+            "🔍 <b>GitHub Repository Monitor</b>",
+            f"👤 User: <code>{escape_html(username)}</code>",
+            f"📅 {now}",
+            "",
+        ]
+
+        # ── Сводка ─────────────────────────────────────────────
+        total_repos = len(repos_data)
+        total_stars = sum(r.get("stars", 0) for r in repos_data)
+        total_forks = sum(r.get("forks", 0) for r in repos_data)
+
+        lines += [
+            "📊 <b>Summary</b>",
+            f"• Repositories: <b>{total_repos}</b>",
+            f"• ⭐ Stars: <b>{total_stars}</b>",
+            f"• 🍴 Forks: <b>{total_forks}</b>",
+            "",
+        ]
+
+        # ── Активные репо ───────────────────────────────────────
+        active = [r for r in repos_data if r.get("recent_commits")][:MAX_ACTIVE_REPOS]
+
+        if active:
+            lines.append("🚀 <b>Recently Active Repositories</b>")
+            lines.append("")
+
+            for repo in active:
+                name  = escape_html(repo["name"])
+                lang  = escape_html(repo.get("language") or "—")
+                desc  = repo.get("description") or ""
+                stars = repo.get("stars", 0)
+                forks = repo.get("forks", 0)
+
+                lines.append(f"📁 <b>{name}</b>")
+
+                if desc and desc != "No description":
+                    lines.append(f"📝 {escape_html(truncate(desc, 80))}")
+
+                lines.append(
+                    f"⭐ {stars}  🍴 {forks}  💻 {lang}"
+                    + ("  🔒 Private" if repo.get("private") else "")
+                )
+
+                # Коммиты
+                commits = repo.get("recent_commits", [])[:MAX_COMMITS]
+                if commits:
+                    lines.append("📝 Recent commits:")
+                    for c in commits:
+                        sha  = escape_html(c["sha"])
+                        msg  = escape_html(c["message"])
+                        auth = escape_html(c["author"])
+                        date = fmt_date(c["date"])
+                        lines.append(f"  • <code>{sha}</code> {msg}")
+                        lines.append(f"    by {auth} · {date}")
+
+                # Open PRs
+                prs = repo.get("open_prs", [])
+                if prs:
+                    lines.append(f"🔄 Open PRs: {len(prs)}")
+
+                lines.append("")
+
+        # ── Репо с открытыми PRs ────────────────────────────────
+        repos_with_prs = [r for r in repos_data if r.get("open_prs")][:MAX_REPOS_WITH_PRS]
+
+        if repos_with_prs:
+            lines.append("🔄 <b>Open Pull Requests</b>")
+            lines.append("")
+
+            for repo in repos_with_prs:
+                name = escape_html(repo["name"])
+                prs  = repo["open_prs"][:MAX_PRS]
+                lines.append(f"📁 <b>{name}</b> — {len(prs)} open PR(s):")
+
+                for pr in prs:
+                    num    = pr["number"]
+                    title  = escape_html(pr["title"])
+                    author = escape_html(pr["author"])
+                    date   = fmt_date(pr["date"])
+                    lines.append(f"  • #{num} {title}")
+                    lines.append(f"    by {author} · {date}")
+
+                lines.append("")
+
+        # ── Нет активности ──────────────────────────────────────
+        if not active and not repos_with_prs:
+            lines.append("😴 No recent activity found.")
+            lines.append("")
+
+        lines.append("—")
+        lines.append(
+            f"<i>GitHub Monitor · Run #{os.getenv('GITHUB_RUN_NUMBER', '?')}</i>"
+        )
+
+        return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────
+# MONITOR
+# ──────────────────────────────────────────────────────────────
 class GitHubMonitor:
     def __init__(self):
-        self.github_token = os.getenv('G_TOKEN')
-        self.telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
-        self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
-        self.github_username = os.getenv('G_USERNAME', 'Dimasick-git')
-        
-        if not all([self.github_token, self.telegram_bot_token, self.telegram_chat_id]):
-            raise ValueError("Missing required environment variables")
-    
-    def get_user_repositories(self) -> List[Dict[str, Any]]:
-        """Получает список всех репозиториев пользователя"""
-        url = f"https://api.github.com/users/{self.github_username}/repos"
-        headers = {
-            'Authorization': f'token {self.github_token}',
-            'Accept': 'application/vnd.github.v3+json'
-        }
-        
-        all_repos = []
-        page = 1
-        
-        while True:
-            params = {'page': page, 'per_page': 100, 'type': 'all'}
-            response = requests.get(url, headers=headers, params=params)
-            
-            if response.status_code != 200:
-                print(f"Error fetching repositories: {response.status_code}")
-                break
-            
-            repos = response.json()
-            if not repos:
-                break
-            
-            all_repos.extend(repos)
-            page += 1
-        
-        return all_repos
-    
-    def get_repository_activity(self, repo_name: str) -> Dict[str, Any]:
-        """Получает информацию о последней активности в репозитории"""
-        url = f"https://api.github.com/repos/{self.github_username}/{repo_name}"
-        headers = {
-            'Authorization': f'token {self.github_token}',
-            'Accept': 'application/vnd.github.v3+json'
-        }
-        
-        response = requests.get(url, headers=headers)
-        
-        if response.status_code != 200:
-            return {'error': f"Failed to fetch repo info: {response.status_code}"}
-        
-        repo_data = response.json()
-        
-        # Получаем последние коммиты
-        commits_url = f"https://api.github.com/repos/{self.github_username}/{repo_name}/commits"
-        commits_response = requests.get(commits_url, headers=headers, params={'per_page': 5})
-        
-        recent_commits = []
-        if commits_response.status_code == 200:
-            commits = commits_response.json()
-            for commit in commits[:3]:  # Берем последние 3 коммита
-                recent_commits.append({
-                    'sha': commit['sha'][:7],
-                    'message': commit['commit']['message'].split('\n')[0][:50],
-                    'author': commit['commit']['author']['name'],
-                    'date': commit['commit']['author']['date']
-                })
-        
-        # Получаем информацию о PRs и issues
-        pulls_url = f"https://api.github.com/repos/{self.github_username}/{repo_name}/pulls"
-        pulls_response = requests.get(pulls_url, headers=headers, params={'state': 'open', 'per_page': 5})
-        
-        open_prs = []
-        if pulls_response.status_code == 200:
-            pulls = pulls_response.json()
-            for pr in pulls[:3]:  # Берем последние 3 PR
-                open_prs.append({
-                    'number': pr['number'],
-                    'title': pr['title'][:50],
-                    'author': pr['user']['login'],
-                    'created_at': pr['created_at']
-                })
-        
-        return {
-            'name': repo_name,
-            'description': repo_data.get('description', 'No description'),
-            'updated_at': repo_data['updated_at'],
-            'pushed_at': repo_data['pushed_at'],
-            'stars': repo_data['stargazers_count'],
-            'forks': repo_data['forks_count'],
-            'language': repo_data.get('language', 'Unknown'),
-            'private': repo_data['private'],
-            'recent_commits': recent_commits,
-            'open_prs': open_prs
-        }
-    
-    def format_telegram_message(self, repos_data: List[Dict[str, Any]]) -> str:
-        """Форматирует сообщение для Telegram"""
-        message = f"🔍 **GitHub Repository Monitor Report**\n"
-        message += f"👤 User: {self.github_username}\n"
-        message += f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n"
-        
-        total_repos = len(repos_data)
-        total_stars = sum(repo.get('stars', 0) for repo in repos_data)
-        total_forks = sum(repo.get('forks', 0) for repo in repos_data)
-        
-        message += f"📊 **Summary:**\n"
-        message += f"• Total repositories: {total_repos}\n"
-        message += f"• ⭐ Total stars: {total_stars}\n"
-        message += f"• 🍴 Total forks: {total_forks}\n\n"
-        
-        # Показываем репозитории с недавней активностью
-        active_repos = [repo for repo in repos_data if repo.get('recent_commits')]
-        
-        if active_repos:
-            message += "🚀 **Recently Active Repositories:**\n\n"
-            
-            for repo in active_repos[:5]:  # Показываем до 5 активных репозиториев
-                message += f"📁 **{repo['name']}**\n"
-                if repo['description'] != 'No description':
-                    message += f"📝 {repo['description']}\n"
-                
-                message += f"🌟 {repo['stars']} ⭐ | 🍴 {repo['forks']} 🍴 | 💻 {repo['language']}\n"
-                
-                # Последние коммиты
-                if repo['recent_commits']:
-                    message += "📝 Recent commits:\n"
-                    for commit in repo['recent_commits'][:2]:
-                        commit_time = datetime.fromisoformat(commit['date'].replace('Z', '+00:00')).strftime('%m-%d %H:%M')
-                        message += f"  • `{commit['sha']}` {commit['message']} ({commit['author']}, {commit_time})\n"
-                
-                # Open PRs
-                if repo['open_prs']:
-                    message += f"🔄 Open PRs: {len(repo['open_prs'])}\n"
-                
-                message += "\n"
-        
-        # Показываем репозитории с открытыми PRs
-        repos_with_prs = [repo for repo in repos_data if repo.get('open_prs')]
-        if repos_with_prs:
-            message += "🔄 **Repositories with Open PRs:**\n\n"
-            for repo in repos_with_prs[:3]:  # Показываем до 3 репозиториев с PRs
-                message += f"📁 **{repo['name']}** - {len(repo['open_prs'])} open PRs:\n"
-                for pr in repo['open_prs'][:2]:
-                    message += f"  • #{pr['number']} {pr['title']} (by {pr['author']})\n"
-                message += "\n"
-        
-        return message
-    
-    def send_telegram_message(self, message: str) -> bool:
-        """Отправляет сообщение в Telegram с fallback методами"""
-        
-        # Метод 1: С Markdown
-        if self._send_with_markdown(message):
-            return True
-            
-        # Метод 2: Без Markdown (fallback)
-        print("Trying fallback without Markdown...")
-        if self._send_plain_text(message):
-            return True
-            
-        # Метод 3: Упрощенное сообщение (fallback)
-        print("Trying simplified message...")
-        simple_message = f"GitHub Monitor Report for {self.github_username} - {len(message)} chars generated"
-        return self._send_plain_text(simple_message)
-    
-    def _send_with_markdown(self, message: str) -> bool:
-        """Отправка сообщения с Markdown форматированием"""
-        url = f"https://api.telegram.org/bot{self.telegram_bot_token}/sendMessage"
-        
-        data = {
-            'chat_id': self.telegram_chat_id,
-            'text': message,
-            'parse_mode': 'Markdown'
-        }
-        
-        return self._make_request(url, data)
-    
-    def _send_plain_text(self, message: str) -> bool:
-        """Отправка простого текстового сообщения"""
-        url = f"https://api.telegram.org/bot{self.telegram_bot_token}/sendMessage"
-        
-        # Очищаем сообщение от Markdown символов
-        clean_message = message.replace('*', '').replace('_', '').replace('`', '').replace('#', '')
-        
-        data = {
-            'chat_id': self.telegram_chat_id,
-            'text': clean_message
-        }
-        
-        return self._make_request(url, data)
-    
-    def _make_request(self, url: str, data: dict) -> bool:
-        """Выполняет HTTP запрос к Telegram API"""
-        try:
-            print(f"Sending message to chat_id: {self.telegram_chat_id}")
-            print(f"Bot token: {self.telegram_bot_token[:10]}...")
-            print(f"Message length: {len(data['text'])} characters")
-            
-            response = requests.post(url, json=data, timeout=30)
-            
-            print(f"Response status: {response.status_code}")
-            print(f"Response body: {response.text}")
-            
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('ok'):
-                    print("Message sent successfully to Telegram")
-                    return True
-                else:
-                    print(f"Telegram API error: {result.get('description', 'Unknown error')}")
-                    return False
-            else:
-                print(f"Failed to send message: {response.status_code} - {response.text}")
-                return False
-        except requests.exceptions.Timeout:
-            print("Timeout while sending Telegram message")
-            return False
-        except requests.exceptions.RequestException as e:
-            print(f"Network error while sending Telegram message: {e}")
-            return False
-        except Exception as e:
-            print(f"Unexpected error sending Telegram message: {e}")
-            return False
-    
-    def run_monitor(self):
-        """Основной метод мониторинга"""
-        try:
-            print(f"Starting GitHub monitor for user: {self.github_username}")
-            
-            # Получаем все репозитории
-            repositories = self.get_user_repositories()
-            print(f"Found {len(repositories)} repositories")
-            
-            # Собираем информацию о каждом репозитории
-            repos_data = []
-            for repo in repositories:
-                repo_name = repo['name']
-                print(f"Processing repository: {repo_name}")
-                
-                repo_info = self.get_repository_activity(repo_name)
-                repos_data.append(repo_info)
-            
-            # Сортируем по времени последнего обновления
-            repos_data.sort(key=lambda x: x.get('pushed_at', ''), reverse=True)
-            
-            # Формируем и отправляем сообщение
-            message = self.format_telegram_message(repos_data)
-            
-            success = self.send_telegram_message(message)
-            
-            if success:
-                print("Monitor completed successfully")
-            else:
-                print("Monitor completed with errors")
-                
-        except Exception as e:
-            error_message = f"❌ Error in GitHub monitor: {str(e)}"
-            print(error_message)
-            self.send_telegram_message(error_message)
+        # Читаем env
+        github_token      = os.getenv("G_TOKEN", "").strip()
+        telegram_token    = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        self.chat_id      = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+        self.username     = os.getenv("G_USERNAME", "Dimasick-git").strip()
 
+        # Валидация
+        missing = []
+        if not github_token:   missing.append("G_TOKEN")
+        if not telegram_token: missing.append("TELEGRAM_BOT_TOKEN")
+        if not self.chat_id:   missing.append("TELEGRAM_CHAT_ID")
+
+        if missing:
+            print(f"❌ Missing environment variables: {', '.join(missing)}")
+            print("   Set them in: Settings → Secrets and variables → Actions")
+            sys.exit(1)
+
+        self.github   = GitHubClient(github_token, self.username)
+        self.telegram = TelegramClient(telegram_token, self.chat_id)
+
+    def run(self):
+        print(f"🚀 Starting GitHub Monitor for: {self.username}")
+        print(f"   Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        print()
+
+        # ── Валидируем Telegram бота ───────────────────────────
+        print("1️⃣  Validating Telegram bot...")
+        if not self.telegram.validate():
+            print("❌ Invalid Telegram token. Exiting.")
+            sys.exit(1)
+
+        # ── Получаем репозитории ───────────────────────────────
+        print()
+        print("2️⃣  Fetching repositories...")
+        repositories = self.github.get_repositories()
+
+        if not repositories:
+            print("⚠️  No repositories found or API error")
+            self.telegram.send(
+                f"⚠️ <b>GitHub Monitor</b>\n"
+                f"No repositories found for <code>{escape_html(self.username)}</code>\n"
+                f"Check G_TOKEN permissions."
+            )
+            sys.exit(0)
+
+        print(f"   Found {len(repositories)} repositories")
+
+        # ── Собираем детальную информацию ─────────────────────
+        print()
+        print("3️⃣  Collecting repository details...")
+        repos_data = []
+
+        for i, repo in enumerate(repositories, 1):
+            name = repo["name"]
+            print(f"   [{i:2d}/{len(repositories)}] {name}", end="", flush=True)
+
+            # Базовые данные из списка (без доп. запроса)
+            info: Dict[str, Any] = {
+                "name":        name,
+                "description": repo.get("description") or "",
+                "updated_at":  repo.get("updated_at", ""),
+                "pushed_at":   repo.get("pushed_at", ""),
+                "stars":       repo.get("stargazers_count", 0),
+                "forks":       repo.get("forks_count", 0),
+                "language":    repo.get("language") or "Unknown",
+                "private":     repo.get("private", False),
+                "recent_commits": [],
+                "open_prs":       [],
+            }
+
+            # Коммиты
+            commits = self.github.get_recent_commits(name, count=3)
+            info["recent_commits"] = commits
+            time.sleep(API_DELAY)
+
+            # PRs
+            prs = self.github.get_open_prs(name, count=3)
+            info["open_prs"] = prs
+            time.sleep(API_DELAY)
+
+            flag = ""
+            if commits: flag += " 📝"
+            if prs:     flag += f" 🔄{len(prs)}"
+            print(flag)
+
+            repos_data.append(info)
+
+        # Сортируем по свежести
+        repos_data.sort(
+            key=lambda x: x.get("pushed_at", ""),
+            reverse=True,
+        )
+
+        # ── Формируем и отправляем сообщение ──────────────────
+        print()
+        print("4️⃣  Building message...")
+        message = MessageBuilder.build(self.username, repos_data)
+        print(f"   Message length: {len(message)} chars")
+
+        print()
+        print("5️⃣  Sending to Telegram...")
+        success = self.telegram.send(message)
+
+        print()
+        if success:
+            print("✅ Monitor completed successfully")
+        else:
+            print("❌ Monitor completed with send errors")
+            # Пробуем отправить аварийное сообщение
+            self.telegram.send(
+                "⚠️ <b>GitHub Monitor</b>\n"
+                "Report was generated but some parts failed to send.\n"
+                "Check Actions logs for details."
+            )
+            sys.exit(1)
+
+
+# ──────────────────────────────────────────────────────────────
+# ENTRY POINT
+# ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    monitor = GitHubMonitor()
-    monitor.run_monitor()
+    try:
+        monitor = GitHubMonitor()
+        monitor.run()
+    except KeyboardInterrupt:
+        print("\n⏹️  Interrupted")
+        sys.exit(0)
+    except SystemExit:
+        raise
+    except Exception as e:
+        import traceback
+        print(f"\n💥 Unexpected error: {e}")
+        traceback.print_exc()
+        sys.exit(1)
