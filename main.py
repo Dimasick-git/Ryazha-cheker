@@ -150,22 +150,22 @@ class GitHubClient:
             ):
                 reset_ts = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
                 wait     = max(reset_ts - int(time.time()), 5)
-                print(f"⚠️  Rate limit hit. Waiting {wait}s...")
+                print(f"⚠️  Лимит запросов превышен. Ожидание {wait}с...")
                 time.sleep(wait)
                 resp = self.session.get(url, params=params, timeout=20)
 
             if resp.status_code == 200:
                 return resp.json()
 
-            print(f"❌ GitHub API {resp.status_code}: {url}")
-            print(f"   Response: {resp.text[:200]}")
+            print(f"❌ Ошибка GitHub API {resp.status_code}: {url}")
+            print(f"   Ответ: {resp.text[:200]}")
             return None
 
         except requests.exceptions.Timeout:
-            print(f"⏱️  Timeout: {url}")
+            print(f"⏱️  Таймаут: {url}")
             return None
         except requests.exceptions.RequestException as e:
-            print(f"🌐 Network error: {e}")
+            print(f"🌐 Ошибка сети: {e}")
             return None
 
     def get_repositories(self) -> List[Dict]:
@@ -312,12 +312,12 @@ class TelegramClient:
             data = resp.json()
             if data.get("ok"):
                 bot = data["result"]
-                print(f"✅ Bot: @{bot['username']} (id={bot['id']})")
+                print(f"✅ Бот: @{bot['username']} (id={bot['id']})")
                 return True
-            print(f"❌ getMe failed: {data.get('description')}")
+            print(f"❌ Ошибка getMe: {data.get('description')}")
             return False
         except Exception as e:
-            print(f"❌ getMe exception: {e}")
+            print(f"❌ Исключение getMe: {e}")
             return False
 
     def send(self, text: str, parse_mode: str = "HTML") -> bool:
@@ -326,22 +326,22 @@ class TelegramClient:
         Автоматически разбивает на части если > 4096 символов.
         """
         parts = self._split(text)
-        print(f"📤 Sending {len(parts)} part(s) to chat {self.chat_id}")
+        print(f"📤 Отправка {len(parts)} части(ей) в чат {self.chat_id}")
 
         all_ok = True
         for i, part in enumerate(parts, 1):
             ok = self._send_part(part, parse_mode)
             if ok:
-                print(f"  ✅ Part {i}/{len(parts)} sent ({len(part)} chars)")
+                print(f"  ✅ Часть {i}/{len(parts)} отправлена ({len(part)} символов)")
             else:
-                print(f"  ❌ Part {i}/{len(parts)} failed — trying plain text")
+                print(f"  ❌ Часть {i}/{len(parts)} не отправлена — пробуем простой текст")
                 # Fallback: убираем HTML теги и шлём plain
                 plain = self._strip_html(part)
                 ok    = self._send_part(plain, parse_mode=None)
                 if ok:
-                    print(f"  ✅ Part {i}/{len(parts)} sent as plain text")
+                    print(f"  ✅ Часть {i}/{len(parts)} отправлена как простой текст")
                 else:
-                    print(f"  ❌ Part {i}/{len(parts)} failed completely")
+                    print(f"  ❌ Часть {i}/{len(parts)} полностью не отправлена")
                     all_ok = False
 
             if i < len(parts):
@@ -369,24 +369,24 @@ class TelegramClient:
             if data.get("ok"):
                 return True
 
-            desc = data.get("description", "unknown error")
-            print(f"  ⚠️  Telegram error: {desc}")
+            desc = data.get("description", "неизвестная ошибка")
+            print(f"  ⚠️  Ошибка Telegram: {desc}")
 
             # Подсказки
             if "chat not found" in desc.lower():
-                print("  💡 Fix: send /start to the bot first, or check CHAT_ID")
+                print("  💡 Исправление: отправьте /start боту сначала, или проверьте CHAT_ID")
             elif "blocked" in desc.lower():
-                print("  💡 Fix: user blocked the bot — unblock it in Telegram")
+                print("  💡 Исправление: пользователь заблокировал бота — разблокируйте в Telegram")
             elif "parse" in desc.lower():
-                print("  💡 Fix: HTML parse error — will retry as plain text")
+                print("  💡 Исправление: ошибка HTML парсинга — будет повторная попытка как простой текст")
 
             return False
 
         except requests.exceptions.Timeout:
-            print("  ⏱️  Telegram timeout")
+            print("  ⏱️  Таймаут Telegram")
             return False
         except Exception as e:
-            print(f"  ❌ Telegram exception: {e}")
+            print(f"  ❌ Исключение Telegram: {e}")
             return False
 
     @staticmethod
@@ -506,7 +506,7 @@ class MessageBuilder:
                             
                             # Добавляем дату модификации
                             commit_date = fmt_date(c["date"])
-                            lines.append(f"Last archive modification date: {commit_date}")
+                            lines.append(f"Дата последнего изменения: {commit_date}")
                             lines.append("")
                             
                             # Строим дерево файлов
@@ -620,43 +620,43 @@ class GitHubMonitor:
         if not self.chat_id:   missing.append("TELEGRAM_CHAT_ID")
 
         if missing:
-            print(f"❌ Missing environment variables: {', '.join(missing)}")
-            print("   Set them in: Settings → Secrets and variables → Actions")
+            print(f"❌ Отсутствуют переменные окружения: {', '.join(missing)}")
+            print("   Настройте их: Settings → Secrets and variables → Actions")
             sys.exit(1)
 
         self.github   = GitHubClient(github_token, self.username)
         self.telegram = TelegramClient(telegram_token, self.chat_id)
 
     def run(self):
-        print(f"🚀 Starting GitHub Monitor for: {self.username}")
-        print(f"   Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        print(f"🚀 Запуск GitHub монитора для: {self.username}")
+        print(f"   Время: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
         print()
 
         # ── Валидируем Telegram бота ───────────────────────────
-        print("1️⃣  Validating Telegram bot...")
+        print("1️⃣  Проверка Telegram бота...")
         if not self.telegram.validate():
-            print("❌ Invalid Telegram token. Exiting.")
+            print("❌ Неверный токен Telegram. Выход.")
             sys.exit(1)
 
         # ── Получаем репозитории ───────────────────────────────
         print()
-        print("2️⃣  Fetching repositories...")
+        print("2️⃣  Получение репозиториев...")
         repositories = self.github.get_repositories()
 
         if not repositories:
-            print("⚠️  No repositories found or API error")
+            print("⚠️  Репозитории не найдены или ошибка API")
             self.telegram.send(
                 f"⚠️ <b>GitHub Monitor</b>\n"
-                f"No repositories found for <code>{escape_html(self.username)}</code>\n"
-                f"Check G_TOKEN permissions."
+                f"Репозитории не найдены для <code>{escape_html(self.username)}</code>\n"
+                f"Проверьте права G_TOKEN."
             )
             sys.exit(0)
 
-        print(f"   Found {len(repositories)} repositories")
+        print(f"   Найдено репозиториев: {len(repositories)}")
 
         # ── Собираем детальную информацию ─────────────────────
         print()
-        print("3️⃣  Collecting repository details...")
+        print("3️⃣  Сбор информации о репозиториях...")
         repos_data = []
 
         for i, repo in enumerate(repositories, 1):
@@ -716,24 +716,24 @@ class GitHubMonitor:
 
         # ── Формируем и отправляем сообщение ──────────────────
         print()
-        print("4️⃣  Building message...")
+        print("4️⃣  Формирование сообщения...")
         message = MessageBuilder.build(self.username, repos_data)
-        print(f"   Message length: {len(message)} chars")
+        print(f"   Длина сообщения: {len(message)} символов")
 
         print()
-        print("5️⃣  Sending to Telegram...")
+        print("5️⃣  Отправка в Telegram...")
         success = self.telegram.send(message)
 
         print()
         if success:
-            print("✅ Monitor completed successfully")
+            print("✅ Мониторинг успешно завершен")
         else:
-            print("❌ Monitor completed with send errors")
+            print("❌ Мониторинг завершен с ошибками отправки")
             # Пробуем отправить аварийное сообщение
             self.telegram.send(
                 "⚠️ <b>GitHub Monitor</b>\n"
-                "Report was generated but some parts failed to send.\n"
-                "Check Actions logs for details."
+                "Отчет сформирован, но некоторые части не отправлены.\n"
+                "Проверьте логи Actions для деталей."
             )
             sys.exit(1)
 
