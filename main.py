@@ -8,6 +8,8 @@ import os
 import sys
 import time
 import requests
+import hashlib
+import json
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
@@ -106,6 +108,67 @@ def check_for_new_releases(username: str) -> Optional[str]:
     except Exception as e:
         print(f'Ошибка проверки новых релизов: {e}')
         return None
+
+
+def calculate_content_checksum(content: str) -> str:
+    """Вычисляет чек-сумму содержимого."""
+    return hashlib.md5(content.encode('utf-8')).hexdigest()
+
+
+def load_repository_state(username: str, repo_name: str) -> Dict[str, Any]:
+    """Загружает состояние репозитория из файла."""
+    try:
+        state_file = f"repo_states_{username}.json"
+        if os.path.exists(state_file):
+            with open(state_file, 'r', encoding='utf-8') as f:
+                states = json.load(f)
+                return states.get(repo_name, {})
+        return {}
+    except Exception as e:
+        print(f'Ошибка загрузки состояния репозитория: {e}')
+        return {}
+
+
+def save_repository_state(username: str, repo_name: str, state: Dict[str, Any]) -> None:
+    """Сохраняет состояние репозитория в файл."""
+    try:
+        state_file = f"repo_states_{username}.json"
+        states = {}
+        
+        # Загружаем существующие состояния
+        if os.path.exists(state_file):
+            with open(state_file, 'r', encoding='utf-8') as f:
+                states = json.load(f)
+        
+        # Обновляем состояние конкретного репозитория
+        states[repo_name] = state
+        
+        # Сохраняем все состояния
+        with open(state_file, 'w', encoding='utf-8') as f:
+            json.dump(states, f, ensure_ascii=False, indent=2)
+            
+    except Exception as e:
+        print(f'Ошибка сохранения состояния репозитория: {e}')
+
+
+def detect_content_changes(old_commits: List[Dict], new_commits: List[Dict]) -> bool:
+    """Определяет есть ли реальные изменения в содержимом коммитов."""
+    if not old_commits or not new_commits:
+        return True
+    
+    # Сравниваем чек-суммы первых 3 коммитов
+    for i in range(min(3, len(old_commits), len(new_commits))):
+        old_commit = old_commits[i]
+        new_commit = new_commits[i]
+        
+        # Создаем строку для сравнения
+        old_content = f"{old_commit.get('sha', '')}{old_commit.get('message', '')}{old_commit.get('date', '')}"
+        new_content = f"{new_commit.get('sha', '')}{new_commit.get('message', '')}{new_commit.get('date', '')}"
+        
+        if calculate_content_checksum(old_content) != calculate_content_checksum(new_content):
+            return True
+    
+    return False
 
 
 def build_file_tree(files: List[Dict]) -> str:
@@ -728,11 +791,15 @@ class GitHubMonitor:
         print()
         print("3️⃣  Сбор информации о репозиториях...")
         repos_data = []
+        has_real_changes = False
 
         for i, repo in enumerate(repositories, 1):
             name = repo["name"]
             print(f"   [{i:2d}/{len(repositories)}] {name}", end="", flush=True)
 
+            # Загружаем предыдущее состояние
+            old_state = load_repository_state(self.username, name)
+            
             # Базовые данные из списка (без доп. запроса)
             info: Dict[str, Any] = {
                 "name":        name,
@@ -769,14 +836,36 @@ class GitHubMonitor:
             info["workflow_runs"] = workflows
             time.sleep(API_DELAY)
 
+            # Проверяем реальные изменения
+            old_commits = old_state.get("recent_commits", [])
+            has_changes = detect_content_changes(old_commits, commits)
+            
+            if has_changes:
+                has_real_changes = True
+                print(" 🔄")
+                # Сохраняем новое состояние
+                save_repository_state(self.username, name, {
+                    "recent_commits": commits,
+                    "last_check": datetime.now(timezone.utc).isoformat()
+                })
+            else:
+                print(" ⏸️")  # Нет изменений
+
             flag = ""
             if commits: flag += " 📝"
             if prs:     flag += f" 🔄{len(prs)}"
             if releases: flag += f" 🚀{len(releases)}"
             if workflows: flag += f" ⚙️{len(workflows)}"
+            if has_changes: flag += " ✨"  # Новые изменения
             print(flag)
 
             repos_data.append(info)
+
+        if not has_real_changes:
+            print()
+            print("⚠️  Реальных изменений в содержимом не найдено.")
+            print("   Мониторинг не требуется. Выход.")
+            return
 
         # Сортируем по свежести
         repos_data.sort(
