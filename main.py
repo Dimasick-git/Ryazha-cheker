@@ -551,164 +551,79 @@ class MessageBuilder:
         # ── Заголовок ──────────────────────────────────────────
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         lines += [
-            "<b>Мониторинг репозиториев GitHub</b>",
-            f"Пользователь: <code>{escape_html(username)}</code>",
-            f"Время: {now}",
-            "",
+            f"<h2>Archive Comparison Report for <b>{escape_html(username)}</b></h2>",
+            f"<b>Last archive modification date:</b> {now}<hr>",
         ]
 
-        # ── Сводка ─────────────────────────────────────────────
-        total_repos = len(repos_data)
-        total_stars = sum(r.get("stars", 0) for r in repos_data)
-        total_forks = sum(r.get("forks", 0) for r in repos_data)
+        # ── Только репозитории с изменениями ───────────────────────
+        changed_repos = [r for r in repos_data if r.get("recent_commits")][:5]  # Максимум 5 репозиториев
 
-        lines += [
-            "<b>Общая статистика</b>",
-            f"Всего репозиториев: <b>{total_repos}</b>",
-            f"Звезд: <b>{total_stars}</b>",
-            f"Форков: <b>{total_forks}</b>",
-            "",
-        ]
+        if not changed_repos:
+            return "<b>No recent activity found</b>"
 
-        # ── Активные репо ───────────────────────────────────────
-        active = [r for r in repos_data if r.get("recent_commits")][:MAX_ACTIVE_REPOS]
+        for repo in changed_repos:
+            name = escape_html(repo["name"])
+            desc = repo.get("description") or ""
+            stars = repo.get("stars", 0)
+            forks = repo.get("forks", 0)
+            lang = escape_html(repo.get("language") or "—")
 
-        if active:
-            lines.append("<b>Активные репозитории</b>")
-            lines.append("")
+            # Заголовок репозитория
+            lines.append(f"<b>{name}.zip</b>")
+            
+            if desc and desc != "No description":
+                lines.append(f"{escape_html(truncate(desc, 80))}")
 
-            for repo in active:
-                name  = escape_html(repo["name"])
-                lang  = escape_html(repo.get("language") or "—")
-                desc  = repo.get("description") or ""
-                stars = repo.get("stars", 0)
-                forks = repo.get("forks", 0)
+            # Коммиты в формате коммит + сообщение
+            commits = repo.get("recent_commits", [])[:3]  # Только 3 коммита
+            if commits:
+                lines.append("<h3>Modified files</h3>")
+                lines.append("<pre>")
+                
+                for c in commits:
+                    sha = escape_html(c["sha"])
+                    msg = escape_html(c["message"])
+                    date = fmt_date(c["date"])
+                    url = c["html_url"]
+                    
+                    # Формат: коммит + сообщение
+                    lines.append(f"{sha} {msg} ({date})")
+                    
+                    # Измененные файлы (только если есть)
+                    files = c.get("files", [])
+                    if files:
+                        tree = build_file_tree(files[:3])  # Только 3 файла
+                        if tree.strip():
+                            lines.append(tree)
+                
+                lines.append("</pre>")
 
-                lines.append(f"<b>{name}</b>")
+            # Релизы (только если есть)
+            releases = repo.get("releases", [])
+            if releases:
+                lines.append("<h3>Added files/folders</h3>")
+                lines.append("<pre>")
+                for rel in releases:
+                    tag = escape_html(rel["tag"])
+                    name = escape_html(rel["name"])
+                    date = fmt_date(rel["published_at"])
+                    url = rel["html_url"]
+                    lines.append(f"<a href=\"{url}\">{tag}</a> - {name} ({date})")
+                lines.append("</pre>")
 
-                if desc and desc != "No description":
-                    lines.append(f"{escape_html(truncate(desc, 80))}")
-
-                lines.append(
-                    f"Звезд: {stars} | Форков: {forks} | Язык: {lang}"
-                    + (" | Приватный" if repo.get("private") else "")
-                )
-                lines.append("<hr>")
-
-                # Коммиты
-                commits = repo.get("recent_commits", [])[:MAX_COMMITS]
-                if commits:
-                    lines.append("Последние коммиты:")
-                    for c in commits:
-                        sha  = escape_html(c["sha"])
-                        msg  = escape_html(c["message"])
-                        auth = escape_html(c["author"])
-                        date = fmt_date(c["date"])
-                        url  = c["html_url"]
-                        
-                        lines.append(f"<a href=\"{url}\"><code>{sha}</code></a>")
-                        lines.append(f"<pre><code>{msg}</code></pre>")
-                        lines.append(f"Автор: {auth} | {date}")
-                        
-                        # Показываем измененные файлы
-                        files = c.get("files", [])
-                        if files:
-                            lines.append("Измененные файлы:")
-                            
-                            # Добавляем дату модификации
-                            commit_date = fmt_date(c["date"])
-                            lines.append(f"Дата последнего изменения: {commit_date}")
-                            lines.append("")
-                            
-                            # Строим дерево файлов
-                            tree = build_file_tree(files)
-                            lines.append(f"<pre><code>{tree}</code></pre>")
-                            
-                            # Добавляем кликабельные ссылки
-                            lines.append("Ссылки на файлы:")
-                            for f in files[:5]:  # Показываем до 5 файлов
-                                filename = escape_html(f["filename"])
-                                changes = f.get("changes", 0)
-                                additions = f.get("additions", 0)
-                                deletions = f.get("deletions", 0)
-                                
-                                # Ссылка на файл в GitHub
-                                file_url = f"{url.replace('/commit/', '/blob/')}/{f['filename']}"
-                                
-                                if changes > 0:
-                                    lines.append(f"• <a href=\"{file_url}\">{filename}</a> (+{additions}/-{deletions})")
-                                else:
-                                    lines.append(f"• <a href=\"{file_url}\">{filename}</a>")
-                        
-                        lines.append("")
-
-                # Релизы
-                releases = repo.get("releases", [])[:MAX_RELEASES]
-                if releases:
-                    lines.append("Последний релиз:")
-                    for rel in releases:
-                        tag = escape_html(rel["tag"])
-                        name = escape_html(rel["name"])
-                        author = escape_html(rel["author"])
-                        date = fmt_date(rel["published_at"])
-                        url = rel["html_url"]
-                        lines.append(f"<a href=\"{url}\">{tag}</a> - {name}")
-                        lines.append(f"Автор: {author} | {date}")
-                    lines.append("")
-
-                # Open PRs
-                prs = repo.get("open_prs", [])
-                if prs:
-                    lines.append(f"Открытые PR: {len(prs)}")
-
-                # Workflow runs
-                workflows = repo.get("workflow_runs", [])[:MAX_WORKFLOWS]
-                if workflows:
-                    lines.append(f"Последние workflow: {len(workflows)}")
-                    for wf in workflows:
-                        name = escape_html(wf["name"])
-                        status = wf["status"]
-                        conclusion = wf.get("conclusion", "running")
-                        date = fmt_date(wf["created_at"])
-                        url = wf["html_url"]
-                        status_icon = "✅" if conclusion == "success" else "❌" if conclusion == "failure" else "⏳"
-                        lines.append(f"{status_icon} <a href=\"{url}\">{name}</a> - {conclusion}")
-                        lines.append(f"Статус: {status} | {date}")
-                    lines.append("")
-
-                lines.append("")
-
-        # ── Репо с открытыми PRs ────────────────────────────────
-        repos_with_prs = [r for r in repos_data if r.get("open_prs")][:MAX_REPOS_WITH_PRS]
-
-        if repos_with_prs:
-            lines.append("<b>Открытые Pull Requests</b>")
-            lines.append("")
-
-            for repo in repos_with_prs:
-                name = escape_html(repo["name"])
-                prs  = repo["open_prs"][:MAX_PRS]
-                lines.append(f"<b>{name}</b> — {len(prs)} открытых PR:")
-
-                for pr in prs:
-                    num    = pr["number"]
-                    title  = escape_html(pr["title"])
+            # PRs (только если есть)
+            prs = repo.get("open_prs", [])
+            if prs:
+                lines.append("<h3>Removed files/folders</h3>")
+                lines.append("<pre>")
+                for pr in prs[:2]:  # Только 2 PR
+                    num = pr["number"]
+                    title = escape_html(pr["title"])
                     author = escape_html(pr["author"])
-                    date   = fmt_date(pr["date"])
-                    lines.append(f"#{num} {title}")
-                    lines.append(f"Автор: {author} | {date}")
+                    lines.append(f"#{num} {title} (by {author})")
+                lines.append("</pre>")
 
-                lines.append("")
-
-        # ── Нет активности ──────────────────────────────────────
-        if not active and not repos_with_prs:
-            lines.append("Недавней активности не найдено.")
-            lines.append("")
-
-        lines.append("—")
-        lines.append(
-            f"<i>GitHub Monitor · Запуск #{os.getenv('GITHUB_RUN_NUMBER', '?')}</i>"
-        )
+            lines.append("<hr>\n\n")
 
         return "\n".join(lines)
 
