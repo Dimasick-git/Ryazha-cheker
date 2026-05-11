@@ -2,47 +2,223 @@ name: GitHub Repository Monitor
 
 on:
   schedule:
-    # Запуск каждые 30 минут
     - cron: '*/30 * * * *'
-  workflow_dispatch: # Ручной запуск для тестирования
+  workflow_dispatch:
   push:
-    branches: [ main ] # Автоматический запуск при коммите в main
+    branches: [main]
   pull_request:
-    branches: [ main ] # Запуск при PR
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-        
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        
-    - name: Run GitHub Monitor
-      env:
-        G_TOKEN: ${{ secrets.G_TOKEN }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        G_USERNAME: ${{ secrets.G_USERNAME }}
-      run: |
-        echo "Starting monitor..."
-        echo "Checking environment variables:"
-        echo "G_TOKEN: ${G_TOKEN:0:10}..."
-        echo "TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:0:10}..."
-        echo "TELEGRAM_CHAT_ID: $TELEGRAM_CHAT_ID"
-        echo "G_USERNAME: $G_USERNAME"
-        python main.py
-        
-    - name: Log execution
-      run: |
-        echo "Monitor executed at $(date)"
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ── ШАГ 1: Проверяем что секреты вообще существуют ────────
+      - name: Validate secrets
+        env:
+          G_TOKEN:              ${{ secrets.G_TOKEN }}
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+          G_USERNAME:           ${{ secrets.G_USERNAME }}
+        run: |
+          set -euo pipefail
+
+          errors=0
+
+          check_secret() {
+            local name="$1"
+            local value="$2"
+            local min_len="${3:-5}"
+
+            if [ -z "$value" ]; then
+              echo "::error::Secret '$name' is EMPTY or NOT SET"
+              echo "  → Settings → Secrets → Actions → New secret → $name"
+              return 1
+            elif [ "${#value}" -lt "$min_len" ]; then
+              echo "::error::Secret '$name' is too short (${#value} chars) — probably wrong value"
+              return 1
+            else
+              # Показываем только первые 4 символа для отладки
+              echo "✅ $name = ${value:0:4}*** (${#value} chars)"
+              return 0
+            fi
+          }
+
+          check_secret "G_TOKEN"            "$G_TOKEN"            10 || errors=$((errors+1))
+          check_secret "TELEGRAM_BOT_TOKEN" "$TELEGRAM_BOT_TOKEN" 20 || errors=$((errors+1))
+          check_secret "TELEGRAM_CHAT_ID"   "$TELEGRAM_CHAT_ID"   5  || errors=$((errors+1))
+          check_secret "G_USERNAME"         "$G_USERNAME"         1  || errors=$((errors+1))
+
+          # Проверяем формат TELEGRAM_BOT_TOKEN (должен быть NUMBERS:STRING)
+          if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+            if echo "$TELEGRAM_BOT_TOKEN" | grep -qE '^[0-9]{8,12}:[A-Za-z0-9_-]{35}$'; then
+              echo "✅ TELEGRAM_BOT_TOKEN format looks correct"
+            else
+              echo "::warning::TELEGRAM_BOT_TOKEN format looks wrong!"
+              echo "  Expected format: 1234567890:ABCDefgh..."
+              echo "  Got length: ${#TELEGRAM_BOT_TOKEN} chars"
+            fi
+          fi
+
+          # Проверяем формат CHAT_ID (число, может быть отрицательным для групп)
+          if [ -n "$TELEGRAM_CHAT_ID" ]; then
+            if echo "$TELEGRAM_CHAT_ID" | grep -qE '^-?[0-9]+$'; then
+              echo "✅ TELEGRAM_CHAT_ID format looks correct ($TELEGRAM_CHAT_ID)"
+            else
+              echo "::error::TELEGRAM_CHAT_ID must be a number! Got: '$TELEGRAM_CHAT_ID'"
+              echo "  For private chat: positive number (e.g. 123456789)"
+              echo "  For group/channel: negative number (e.g. -1001234567890)"
+              errors=$((errors+1))
+            fi
+          fi
+
+          if [ "$errors" -gt 0 ]; then
+            echo ""
+            echo "::error::$errors secret(s) failed validation. Fix them in:"
+            echo "  Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ All secrets validated"
+
+      # ── ШАГ 2: Прямой тест Telegram API ───────────────────────
+      - name: Test Telegram API directly
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+
+          echo "::group::Testing Telegram Bot API"
+
+          # Проверяем что бот живой
+          echo "1. Checking bot info (getMe)..."
+          bot_response=$(curl -s \
+            --max-time 15 \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe")
+
+          echo "getMe response: $bot_response"
+
+          if echo "$bot_response" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          if not data.get('ok'):
+              print('ERROR: ' + data.get('description', 'Unknown error'))
+              sys.exit(1)
+          bot = data['result']
+          print(f'Bot name: {bot[\"first_name\"]}')
+          print(f'Bot username: @{bot[\"username\"]}')
+          print(f'Bot ID: {bot[\"id\"]}')
+          "; then
+            echo "✅ Bot token is valid"
+          else
+            echo "::error::Bot token is INVALID"
+            echo "  Get new token from @BotFather in Telegram"
+            exit 1
+          fi
+
+          # Отправляем тестовое сообщение
+          echo ""
+          echo "2. Sending test message to chat $TELEGRAM_CHAT_ID..."
+          send_response=$(curl -s \
+            --max-time 15 \
+            -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"chat_id\": $TELEGRAM_CHAT_ID,
+              \"text\": \"🔧 GitHub Actions test message\nRepo: ${{ github.repository }}\nRun: #${{ github.run_number }}\nTime: $(date -u '+%Y-%m-%d %H:%M UTC')\",
+              \"parse_mode\": \"HTML\"
+            }")
+
+          echo "sendMessage response: $send_response"
+
+          if echo "$send_response" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          if not data.get('ok'):
+              err = data.get('description', 'Unknown error')
+              print('ERROR: ' + err)
+
+              # Подсказки по частым ошибкам
+              if 'chat not found' in err.lower():
+                  print('FIX: Bot is not added to this chat, or CHAT_ID is wrong')
+                  print('     For private chat: send any message to bot first')
+                  print('     For group: add bot to group, send message, use @userinfobot')
+              elif 'bot was blocked' in err.lower():
+                  print('FIX: User blocked the bot. Unblock it in Telegram.')
+              elif 'forbidden' in err.lower():
+                  print('FIX: Bot has no permission to write to this chat')
+              sys.exit(1)
+          msg = data['result']
+          print(f'Message sent! ID: {msg[\"message_id\"]}')
+          print(f'Chat ID confirmed: {msg[\"chat\"][\"id\"]}')
+          "; then
+            echo "✅ Test message sent successfully"
+          else
+            echo "::error::Failed to send message"
+            exit 1
+          fi
+
+          echo "::endgroup::"
+
+      # ── ШАГ 3: Запуск основного скрипта с подробным логом ─────
+      - name: Run GitHub Monitor
+        env:
+          G_TOKEN:              ${{ secrets.G_TOKEN }}
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+          G_USERNAME:           ${{ secrets.G_USERNAME }}
+          PYTHONUNBUFFERED:     "1"
+          PYTHONFAULTHANDLER:   "1"
+        run: |
+          set -euo pipefail
+
+          echo "::group::Running main.py"
+          echo "Started at: $(date -u)"
+
+          # Запускаем с выводом traceback при падении
+          python3 -u main.py
+          exit_code=$?
+
+          echo "Finished at: $(date -u)"
+          echo "Exit code: $exit_code"
+          echo "::endgroup::"
+
+          if [ $exit_code -ne 0 ]; then
+            echo "::error::main.py exited with code $exit_code"
+            exit $exit_code
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## 📊 Monitor Run"
+            echo ""
+            echo "| Параметр | Значение |"
+            echo "|----------|----------|"
+            echo "| Время    | $(date -u '+%Y-%m-%d %H:%M UTC') |"
+            echo "| Триггер  | \`${{ github.event_name }}\` |"
+            echo "| Статус   | ${{ job.status }} |"
+            echo "| Run      | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+          } >> "$GITHUB_STEP_SUMMARY"
