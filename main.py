@@ -766,10 +766,16 @@ class GitHubMonitor:
                 "workflow_runs":  [],
             }
 
-            # Коммиты
-            commits = self.github.get_recent_commits(name, count=MAX_COMMITS)
-            info["recent_commits"] = commits
+             # Коммиты
+            all_commits = self.github.get_recent_commits(name, count=MAX_COMMITS)
             time.sleep(API_DELAY)
+
+            # Фильтруем только новые коммиты, которых нет в памяти
+            old_commits = old_state.get("recent_commits", [])
+            old_shas = {c.get("sha") for c in old_commits if c.get("sha")}
+            new_commits = [c for c in all_commits if c.get("sha") not in old_shas]
+            
+            info["recent_commits"] = new_commits
 
             # PRs
             prs = self.github.get_open_prs(name, count=MAX_PRS)
@@ -786,22 +792,22 @@ class GitHubMonitor:
             info["workflow_runs"] = workflows
             time.sleep(API_DELAY)
 
-            # Проверяем реальные изменения
-            old_commits = old_state.get("recent_commits", [])
-            has_changes = detect_content_changes(old_commits, commits)
-            
-            if has_changes:
+            # Проверяем реальные изменения (есть новые коммиты)
+            if new_commits:
                 has_real_changes = True
-                print(" [ИЗМЕНЕНО]")
-                # Сохраняем новое состояние
+                print(f" [НОВЫЕ КОММИТЫ: {len(new_commits)}]")
+                # Сохраняем все коммиты в память (и старые, и новые), чтобы знать историю
+                updated_commits = all_commits[:MAX_COMMITS]
                 save_repository_state(self.username, name, {
-                    "recent_commits": commits,
+                    "recent_commits": updated_commits,
                     "last_check": datetime.now(timezone.utc).isoformat()
                 })
             else:
                 print(" [без изменений]")
-
-            repos_data.append(info)
+            
+            # Добавляем в отчет только если есть что показать
+            if new_commits or prs or releases:
+                repos_data.append(info)
 
         if not has_real_changes:
             print()

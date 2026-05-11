@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Unit checks for Telegram message formatting."""
+"""Тесты для проверки форматирования сообщений Telegram и логики памяти."""
 
 from main import MessageBuilder, build_github_file_url, html_code_block
 
 
-def test_html_code_block_uses_telegram_pre_tag():
-    block = html_code_block("docs: add <changelog>")
+def тест_блок_кода_использует_тег_pre():
+    блок = html_code_block("docs: add <changelog>")
 
-    assert block == "<pre>docs: add &lt;changelog&gt;</pre>"
-    assert "```" not in block
+    assert блок == "<pre>docs: add &lt;changelog&gt;</pre>"
+    assert "```" not in блок
 
 
-def test_file_url_prefers_github_blob_url():
+def тест_ссылка_на_файл_предпочитает_blob_url():
     file_info = {
         "blob_url": "https://github.com/owner/repo/blob/abc123/docs/changelog.md",
         "raw_url": "https://raw.githubusercontent.com/owner/repo/abc123/docs/changelog.md",
@@ -27,7 +27,7 @@ def test_file_url_prefers_github_blob_url():
     )
 
 
-def test_file_url_falls_back_to_commit_sha_not_main_branch():
+def тест_ссылка_на_файл_использует_sha_коммита_а_не_ветку_main():
     url = build_github_file_url(
         "https://github.com/owner/repo/commit/abc123",
         "folder/file name.md",
@@ -38,13 +38,13 @@ def test_file_url_falls_back_to_commit_sha_not_main_branch():
     assert "/blob/main/" not in url
 
 
-def test_message_builder_has_no_markdown_fences_and_keeps_links():
+def тест_построитель_сообщений_не_использует_markdown_и_сохраняет_ссылки():
     message, markup = MessageBuilder.build(
         "owner",
         [
             {
                 "name": "repo",
-                "description": "No description",
+                "description": "Описание",
                 "recent_commits": [
                     {
                         "sha": "abc1234",
@@ -79,8 +79,8 @@ def test_message_builder_has_no_markdown_fences_and_keeps_links():
 
 
 if __name__ == "__main__":
-    test_html_code_block_uses_telegram_pre_tag()
-    test_file_url_prefers_github_blob_url()
-    test_file_url_falls_back_to_commit_sha_not_main_branch()
-    test_message_builder_has_no_markdown_fences_and_keeps_links()
-    print("message formatting tests passed")
+    тест_блок_кода_использует_тег_pre()
+    тест_ссылка_на_файл_предпочитает_blob_url()
+    тест_ссылка_на_файл_использует_sha_коммита_а_не_ветку_main()
+    тест_построитель_сообщений_не_использует_markdown_и_сохраняет_ссылки()
+    print("Тесты форматирования сообщений пройдены успешно")
