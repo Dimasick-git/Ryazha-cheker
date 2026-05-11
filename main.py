@@ -611,8 +611,9 @@ class MessageBuilder:
                             additions = f.get("additions", 0)
                             deletions = f.get("deletions", 0)
                             
-                            # Ссылка на файл в GitHub
-                            file_url = f"{url.replace('/commit/', '/blob/')}/{f['filename']}"
+                            # Прямая ссылка на файл в GitHub
+                            # Формат: https://github.com/username/repo/blob/branch/filepath
+                            file_url = f"https://github.com/{c['html_url'].split('/')[3]}/{c['html_url'].split('/')[4]}/blob/main/{f['filename']}"
                             
                             if changes > 0:
                                 lines.append(f"• <a href=\"{file_url}\">{filename}</a> (+{additions}/-{deletions})")
