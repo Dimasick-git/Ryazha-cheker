@@ -429,7 +429,9 @@ class MessageBuilder:
                         url  = c["html_url"]
                         
                         lines.append(f"<a href=\"{url}\"><code>{sha}</code></a>")
-                        lines.append(f"```{msg}```")
+                        lines.append(f"```")
+                        lines.append(f"{msg}")
+                        lines.append(f"```")
                         lines.append(f"Автор: {auth} | {date}")
                         
                         # Показываем измененные файлы
