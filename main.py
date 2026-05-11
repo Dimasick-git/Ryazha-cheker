@@ -225,6 +225,7 @@ def build_file_tree(files: List[Dict]) -> str:
             folders[folder].append(f)
     
     # Добавляем корневые файлы
+        # Добавляем корневые файлы
     if root_files:
         for f in root_files:
             changes = f.get("changes", 0)
@@ -233,13 +234,13 @@ def build_file_tree(files: List[Dict]) -> str:
             filename = f["filename"]
             
             if changes > 0:
-                tree_lines.append(f"├─ {filename} (+{additions}/-{deletions})")
+                tree_lines.append(f"├── {filename} (+{additions}/-{deletions})")
             else:
-                tree_lines.append(f"├─ {filename}")
+                tree_lines.append(f"├── {filename}")
     
     # Добавляем папки
     for folder_name, folder_files in sorted(folders.items()):
-        tree_lines.append(f"├─ {folder_name}/")
+        tree_lines.append(f"├── {folder_name}/")
         
         for i, f in enumerate(folder_files):
             changes = f.get("changes", 0)
@@ -247,19 +248,14 @@ def build_file_tree(files: List[Dict]) -> str:
             deletions = f.get("deletions", 0)
             filename = f["filename"]
             
-            # Вычисляем относительный путь
-            rel_path = filename.replace(f"{folder_name}/", "", 1)
-            
-            # Определяем префикс (├─ или └─)
-            if i == len(folder_files) - 1 and not root_files:
-                prefix = "└─"
-            else:
-                prefix = "│  ├─"
+            rel_path = filename.split("/")[-1]
+            is_last = (i == len(folder_files) - 1)
+            prefix = "│   └── " if is_last else "│   ├── "
             
             if changes > 0:
-                tree_lines.append(f"{prefix} {rel_path} (+{additions}/-{deletions})")
+                tree_lines.append(f"{prefix}{rel_path} (+{additions}/-{deletions})")
             else:
-                tree_lines.append(f"{prefix} {rel_path}")
+                tree_lines.append(f"{prefix}{rel_path}")
     
     return "\n".join(tree_lines)
 
@@ -771,9 +767,14 @@ class GitHubMonitor:
             time.sleep(API_DELAY)
 
             # Фильтруем только новые коммиты, которых нет в памяти
-            old_commits = old_state.get("recent_commits", [])
-            old_shas = {c.get("sha") for c in old_commits if c.get("sha")}
-            new_commits = [c for c in all_commits if c.get("sha") not in old_shas]
+            # Мы храним список всех известных SHA, чтобы не дублировать их
+            known_shas = set(old_state.get("known_shas", []))
+            
+            # Если это самый первый запуск (память пуста), берем только последний коммит
+            if not known_shas:
+                new_commits = all_commits[:1]
+            else:
+                new_commits = [c for c in all_commits if c.get("sha") not in known_shas]
             
             info["recent_commits"] = new_commits
 
@@ -796,13 +797,19 @@ class GitHubMonitor:
             if new_commits:
                 has_real_changes = True
                 print(f" [НОВЫЕ КОММИТЫ: {len(new_commits)}]")
-                # Сохраняем все коммиты в память (и старые, и новые), чтобы знать историю
-                updated_commits = all_commits[:MAX_COMMITS]
-                save_repository_state(self.username, name, {
-                    "recent_commits": updated_commits,
-                    "last_check": datetime.now(timezone.utc).isoformat()
-                })
-            else:
+                
+            # Всегда обновляем список известных SHA, чтобы не слать их в следующий раз
+            # Объединяем старые SHA с новыми из текущего запроса
+            all_current_shas = [c.get("sha") for c in all_commits if c.get("sha")]
+            updated_shas = list(set(known_shas) | set(all_current_shas))
+            
+            # Ограничиваем список последних 100 SHA, чтобы файл не раздувался
+            save_repository_state(self.username, name, {
+                "known_shas": updated_shas[-100:],
+                "last_check": datetime.now(timezone.utc).isoformat()
+            })
+            
+            if not new_commits:
                 print(" [без изменений]")
             
             # Добавляем в отчет только если есть что показать

@@ -53,8 +53,8 @@ def test_telegram():
     try:
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         
-        # Простое текстовое сообщение без Markdown
-        message = "🧪 Test message from GitHub Monitor\n\nIf you see this, Telegram integration works!"
+        # Тестовое сообщение на русском языке
+        message = "🧪 Тестовое сообщение от GitHub Monitor\n\nЕсли вы видите это, интеграция с Telegram работает корректно!"
         
         data = {
             'chat_id': chat_id,
