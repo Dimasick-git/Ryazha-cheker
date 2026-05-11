@@ -494,11 +494,7 @@ class MessageBuilder:
                         url  = c["html_url"]
                         
                         lines.append(f"<a href=\"{url}\"><code>{sha}</code></a>")
-                        lines.append(f"```")
-                        lines.append(f"")
-                        lines.append(f"{msg}")
-                        lines.append(f"")
-                        lines.append(f"```")
+                        lines.append(f"<pre><code>{msg}</code></pre>")
                         lines.append(f"Автор: {auth} | {date}")
                         
                         # Показываем измененные файлы
@@ -513,7 +509,7 @@ class MessageBuilder:
                             
                             # Строим дерево файлов
                             tree = build_file_tree(files)
-                            lines.append(f"```{tree}```")
+                            lines.append(f"<pre><code>{tree}</code></pre>")
                             
                             # Добавляем кликабельные ссылки
                             lines.append("Ссылки на файлы:")
