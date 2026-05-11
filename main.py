@@ -34,6 +34,8 @@ API_DELAY          = 0.5   # секунд
 # ──────────────────────────────────────────────────────────────
 # HELPERS
 # ──────────────────────────────────────────────────────────────
+import json
+
 def escape_html(text: str) -> str:
     """Экранирует спецсимволы для HTML parse_mode."""
     return (
@@ -58,6 +60,52 @@ def truncate(text: str, max_len: int = 60) -> str:
     """Обрезает строку с многоточием."""
     text = str(text)
     return text if len(text) <= max_len else text[: max_len - 1] + "…"
+
+
+def load_last_check_date() -> Optional[str]:
+    """Загружает дату последней проверки из JSON файла."""
+    try:
+        if os.path.exists('last_check.json'):
+            with open('last_check.json', 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('last_check_date')
+        return None
+    except Exception as e:
+        print(f'Ошибка загрузки даты последней проверки: {e}')
+        return None
+
+
+def save_last_check_date(date_str: str) -> None:
+    """Сохраняет дату последней проверки в JSON файл."""
+    try:
+        with open('last_check.json', 'w', encoding='utf-8') as f:
+            json.dump({'last_check_date': date_str}, f, ensure_ascii=False, indent=2)
+        print(f'Дата последней проверки обновлена: {date_str}')
+    except Exception as e:
+        print(f'Ошибка сохранения даты последней проверки: {e}')
+
+
+def check_for_new_releases(username: str) -> Optional[str]:
+    """Проверяет наличие новых релизов на GitHub."""
+    try:
+        # Получаем информацию о последнем релизе пользователя
+        response = requests.get(
+            f"{GITHUB_API}/users/{username}/repos",
+            params={"type": "owner", "sort": "updated", "per_page": 10},
+            timeout=20
+        )
+        
+        if response.status_code == 200:
+            repos = response.json()
+            if repos:
+                # Берем дату обновления самого свежего репозитория
+                latest_update = repos[0].get('updated_at', '')
+                if latest_update:
+                    return fmt_date(latest_update)
+        return None
+    except Exception as e:
+        print(f'Ошибка проверки новых релизов: {e}')
+        return None
 
 
 def build_file_tree(files: List[Dict]) -> str:
@@ -297,9 +345,10 @@ class GitHubClient:
 # TELEGRAM CLIENT
 # ──────────────────────────────────────────────────────────────
 class TelegramClient:
-    def __init__(self, token: str, chat_id: str):
+    def __init__(self, token: str, chat_id: str, topic_id: Optional[str] = None):
         self.token   = token
         self.chat_id = chat_id
+        self.topic_id = topic_id  # Поддержка тем/топиков в Telegram
         self.base    = f"{TELEGRAM_API}/bot{token}"
         self.session = requests.Session()
 
@@ -481,6 +530,7 @@ class MessageBuilder:
                     f"Звезд: {stars} | Форков: {forks} | Язык: {lang}"
                     + (" | Приватный" if repo.get("private") else "")
                 )
+                lines.append("<hr>")
 
                 # Коммиты
                 commits = repo.get("recent_commits", [])[:MAX_COMMITS]
@@ -623,14 +673,36 @@ class GitHubMonitor:
             sys.exit(1)
 
         self.github   = GitHubClient(github_token, self.username)
-        self.telegram = TelegramClient(telegram_token, self.chat_id)
+        self.telegram = TelegramClient(
+            telegram_token, 
+            self.chat_id, 
+            topic_id=os.getenv("TELEGRAM_TOPIC_ID", "").strip() or None
+        )
 
     def run(self):
         print(f"🚀 Запуск GitHub монитора для: {self.username}")
         print(f"   Время: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
         print()
 
+        # ── Проверка новых релизов ───────────────────────────────
+        print("0️⃣  Проверка новых релизов...")
+        latest_update = check_for_new_releases(self.username)
+        last_check = load_last_check_date()
+        
+        if latest_update and last_check and latest_update == last_check:
+            print(f"⚠️  Новых релизов не найдено. Последнее обновление: {latest_update}")
+            print("   Мониторинг не требуется. Выход.")
+            return
+        
+        if latest_update:
+            print(f"✅ Обнаружены новые изменения! Последнее обновление: {latest_update}")
+            if last_check:
+                print(f"   Предыдущая проверка: {last_check}")
+            else:
+                print("   Первая проверка")
+
         # ── Валидируем Telegram бота ───────────────────────────
+        print()
         print("1️⃣  Проверка Telegram бота...")
         if not self.telegram.validate():
             print("❌ Неверный токен Telegram. Выход.")
@@ -725,6 +797,9 @@ class GitHubMonitor:
         print()
         if success:
             print("✅ Мониторинг успешно завершен")
+            # Сохраняем дату последней успешной проверки
+            if latest_update:
+                save_last_check_date(latest_update)
         else:
             print("❌ Мониторинг завершен с ошибками отправки")
             # Пробуем отправить аварийное сообщение
