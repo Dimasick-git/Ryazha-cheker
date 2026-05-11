@@ -21,9 +21,9 @@ TELEGRAM_API       = "https://api.telegram.org"
 
 # Сколько репо/коммитов показывать
 MAX_ACTIVE_REPOS   = 10  # Показываем все репозитории
-MAX_COMMITS        = 3
+MAX_COMMITS        = 5
 MAX_PRS            = 3
-MAX_RELEASES       = 2
+MAX_RELEASES       = 1  # Только latest релиз
 MAX_WORKFLOWS      = 3
 MAX_REPOS_WITH_PRS = 3
 
@@ -135,11 +135,29 @@ class GitHubClient:
         result = []
         for c in data[:count]:
             try:
+                # Получаем информацию об измененных файлах
+                files_data = self._get(
+                    f"{GITHUB_API}/repos/{self.username}/{repo}/commits/{c['sha']}"
+                )
+                
+                files = []
+                if files_data and "files" in files_data:
+                    for f in files_data["files"][:5]:  # Показываем до 5 файлов
+                        files.append({
+                            "filename": f["filename"],
+                            "changes": f.get("changes", 0),
+                            "additions": f.get("additions", 0),
+                            "deletions": f.get("deletions", 0),
+                            "patch": f.get("patch", "")[:200]  # Обрезаем патч
+                        })
+                
                 result.append({
                     "sha":     c["sha"][:7],
                     "message": truncate(c["commit"]["message"].split("\n")[0], 60),
                     "author":  truncate(c["commit"]["author"]["name"], 25),
                     "date":    c["commit"]["author"]["date"],
+                    "html_url": c["html_url"],
+                    "files":   files
                 })
             except (KeyError, TypeError):
                 continue
@@ -167,28 +185,24 @@ class GitHubClient:
                 continue
         return result
 
-    def get_releases(self, repo: str, count: int = 3) -> List[Dict]:
-        """Последние релизы репозитория."""
+    def get_releases(self, repo: str, count: int = 1) -> List[Dict]:
+        """Последний релиз репозитория (latest)."""
         data = self._get(
-            f"{GITHUB_API}/repos/{self.username}/{repo}/releases",
-            params={"per_page": count},
+            f"{GITHUB_API}/repos/{self.username}/{repo}/releases/latest",
         )
-        if not data or not isinstance(data, list):
+        if not data or not isinstance(data, dict):
             return []
 
-        result = []
-        for release in data[:count]:
-            try:
-                result.append({
-                    "tag":         release["tag_name"],
-                    "name":        truncate(release.get("name") or release["tag_name"], 50),
-                    "author":      release["author"]["login"] if release.get("author") else "Unknown",
-                    "published_at": release["published_at"],
-                    "html_url":    release["html_url"],
-                })
-            except (KeyError, TypeError):
-                continue
-        return result
+        try:
+            return [{
+                "tag":         data["tag_name"],
+                "name":        truncate(data.get("name") or data["tag_name"], 50),
+                "author":      data["author"]["login"] if data.get("author") else "Unknown",
+                "published_at": data["published_at"],
+                "html_url":    data["html_url"],
+            }]
+        except (KeyError, TypeError):
+            return []
 
     def get_workflow_runs(self, repo: str, count: int = 5) -> List[Dict]:
         """Последние workflow runs репозитория."""
@@ -412,15 +426,36 @@ class MessageBuilder:
                         msg  = escape_html(c["message"])
                         auth = escape_html(c["author"])
                         date = fmt_date(c["date"])
-                        lines.append(f"<code>{sha}</code>")
-                        lines.append(f"{msg}")
+                        url  = c["html_url"]
+                        
+                        lines.append(f"<a href=\"{url}\"><code>{sha}</code></a>")
+                        lines.append(f"```{msg}```")
                         lines.append(f"Автор: {auth} | {date}")
+                        
+                        # Показываем измененные файлы
+                        files = c.get("files", [])
+                        if files:
+                            lines.append("Измененные файлы:")
+                            for f in files[:3]:  # Показываем до 3 файлов
+                                filename = escape_html(f["filename"])
+                                changes = f.get("changes", 0)
+                                additions = f.get("additions", 0)
+                                deletions = f.get("deletions", 0)
+                                
+                                # Ссылка на файл в GitHub
+                                file_url = f"{url.replace('/commit/', '/blob/')}/{f['filename']}"
+                                
+                                if changes > 0:
+                                    lines.append(f"• <a href=\"{file_url}\">{filename}</a> (+{additions}/-{deletions})")
+                                else:
+                                    lines.append(f"• <a href=\"{file_url}\">{filename}</a>")
+                        
                         lines.append("")
 
                 # Релизы
                 releases = repo.get("releases", [])[:MAX_RELEASES]
                 if releases:
-                    lines.append(f"Релизы: {len(releases)}")
+                    lines.append("Последний релиз:")
                     for rel in releases:
                         tag = escape_html(rel["tag"])
                         name = escape_html(rel["name"])
