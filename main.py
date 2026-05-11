@@ -597,7 +597,9 @@ class MessageBuilder:
                         # Дерево файлов
                         tree = build_file_tree(files[:5])
                         if tree.strip():
-                            lines.append(f"<pre><code>{tree}</code></pre>")
+                            lines.append(f"```")
+                            lines.append(f"{tree}")
+                            lines.append(f"```")
                         
                         # Ссылки на файлы
                         lines.append("Ссылки на файлы:")
@@ -620,7 +622,7 @@ class MessageBuilder:
             releases = repo.get("releases", [])
             if releases:
                 lines.append("<h3>Added files/folders</h3>")
-                lines.append("<pre>")
+                lines.append(f"```")
                 for rel in releases:
                     tag = escape_html(rel["tag"])
                     name = escape_html(rel["name"])
@@ -629,13 +631,13 @@ class MessageBuilder:
                     url = rel["html_url"]
                     lines.append(f"<a href=\"{url}\">{tag}</a> - {name}")
                     lines.append(f"Автор: {author} | {date}")
-                lines.append("</pre>")
+                lines.append(f"```")
 
             # PRs
             prs = repo.get("open_prs", [])
             if prs:
                 lines.append("<h3>Removed files/folders</h3>")
-                lines.append("<pre>")
+                lines.append(f"```")
                 for pr in prs[:2]:
                     num = pr["number"]
                     title = escape_html(pr["title"])
@@ -643,7 +645,7 @@ class MessageBuilder:
                     date = fmt_date(pr["date"])
                     lines.append(f"#{num} {title}")
                     lines.append(f"Автор: {author} | {date}")
-                lines.append("</pre>")
+                lines.append(f"```")
 
             lines.append("<hr>\n\n")
 
