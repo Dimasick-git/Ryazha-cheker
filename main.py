@@ -587,7 +587,11 @@ class MessageBuilder:
                     url = c["html_url"]
                     
                     # Формат: коммит + сообщение
-                    lines.append(f"<pre><code>{sha} {msg} ({date})</code></pre>")
+                    lines.append(f"<a href=\"{url}\"><code>{sha}</code></a>")
+                    lines.append(f"```")
+                    lines.append(f"{msg}")
+                    lines.append(f"```")
+                    lines.append(f"Автор: {auth} | {date}")
                     
                     # Измененные файлы (только если есть)
                     files = c.get("files", [])
