@@ -5,6 +5,10 @@ on:
     # Запуск каждые 30 минут
     - cron: '*/30 * * * *'
   workflow_dispatch: # Ручной запуск для тестирования
+  push:
+    branches: [ main ] # Автоматический запуск при коммите в main
+  pull_request:
+    branches: [ main ] # Запуск при PR
 
 jobs:
   monitor:
@@ -31,6 +35,12 @@ jobs:
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         G_USERNAME: ${{ secrets.G_USERNAME }}
       run: |
+        echo "Starting monitor..."
+        echo "Checking environment variables:"
+        echo "G_TOKEN: ${G_TOKEN:0:10}..."
+        echo "TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:0:10}..."
+        echo "TELEGRAM_CHAT_ID: $TELEGRAM_CHAT_ID"
+        echo "G_USERNAME: $G_USERNAME"
         python main.py
         
     - name: Log execution

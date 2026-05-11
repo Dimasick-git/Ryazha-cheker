@@ -170,15 +170,34 @@ class GitHubMonitor:
         }
         
         try:
-            response = requests.post(url, json=data)
+            print(f"Sending message to chat_id: {self.telegram_chat_id}")
+            print(f"Bot token: {self.telegram_bot_token[:10]}...")
+            print(f"Message length: {len(message)} characters")
+            
+            response = requests.post(url, json=data, timeout=30)
+            
+            print(f"Response status: {response.status_code}")
+            print(f"Response body: {response.text}")
+            
             if response.status_code == 200:
-                print("Message sent successfully to Telegram")
-                return True
+                result = response.json()
+                if result.get('ok'):
+                    print("Message sent successfully to Telegram")
+                    return True
+                else:
+                    print(f"Telegram API error: {result.get('description', 'Unknown error')}")
+                    return False
             else:
                 print(f"Failed to send message: {response.status_code} - {response.text}")
                 return False
+        except requests.exceptions.Timeout:
+            print("Timeout while sending Telegram message")
+            return False
+        except requests.exceptions.RequestException as e:
+            print(f"Network error while sending Telegram message: {e}")
+            return False
         except Exception as e:
-            print(f"Error sending Telegram message: {e}")
+            print(f"Unexpected error sending Telegram message: {e}")
             return False
     
     def run_monitor(self):
