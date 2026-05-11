@@ -22,9 +22,20 @@
 
 ### 2. Получение вашего Chat ID
 
+**Способ 1: Через @userinfobot**
 1. Найдите в Telegram бота [@userinfobot](https://t.me/userinfobot)
 2. Отправьте ему любое сообщение
 3. Бот пришлет ваш **Chat ID** (число)
+
+**Способ 2: Через @RawDataBot**
+1. Найдите в Telegram бота [@RawDataBot](https://t.me/RawDataBot)
+2. Отправьте ему любое сообщение
+3. В ответе найдите поле `"chat": {"id": 123456789}` - это ваш Chat ID
+
+**Способ 3: Через API Telegram**
+1. Найдите вашего бота в Telegram и отправьте ему сообщение
+2. Перейдите по ссылке: `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates`
+3. В ответе найдите `"chat": {"id": 123456789}`
 
 ### 3. Создание GitHub Personal Access Token
 
@@ -50,10 +61,10 @@
 
 | Имя секрета | Значение |
 |-------------|----------|
-| `GITHUB_TOKEN` | Ваш Personal Access Token |
+| `G_TOKEN` | Ваш Personal Access Token |
 | `TELEGRAM_BOT_TOKEN` | Токен вашего Telegram бота |
 | `TELEGRAM_CHAT_ID` | Ваш Chat ID в Telegram |
-| `GITHUB_USERNAME` | `Dimasick-git` (ваш GitHub username) |
+| `G_USERNAME` | `Dimasick-git` (ваш GitHub username) |
 
 ## 🏃‍♂️ Запуск
 
@@ -126,10 +137,10 @@ schedule:
 pip install -r requirements.txt
 
 # Установка переменных окружения
-export GITHUB_TOKEN="your_token_here"
+export G_TOKEN="your_token_here"
 export TELEGRAM_BOT_TOKEN="your_bot_token_here"
 export TELEGRAM_CHAT_ID="your_chat_id_here"
-export GITHUB_USERNAME="Dimasick-git"
+export G_USERNAME="Dimasick-git"
 
 # Запуск
 python main.py

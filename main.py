@@ -12,10 +12,10 @@ from typing import List, Dict, Any
 
 class GitHubMonitor:
     def __init__(self):
-        self.github_token = os.getenv('GITHUB_TOKEN')
+        self.github_token = os.getenv('G_TOKEN')
         self.telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
-        self.github_username = os.getenv('GITHUB_USERNAME', 'Dimasick-git')
+        self.github_username = os.getenv('G_USERNAME', 'Dimasick-git')
         
         if not all([self.github_token, self.telegram_bot_token, self.telegram_chat_id]):
             raise ValueError("Missing required environment variables")
