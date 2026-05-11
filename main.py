@@ -583,79 +583,81 @@ class MessageBuilder:
         lines = []
         buttons = []
 
-        # ── SYSTEM HEADER ──────────────────────────────────────
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        # ── Заголовок ──────────────────────────────────────────
+        now = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M")
         lines += [
-            f"<code>[ SYSTEM REPORT: GITHUB MONITOR ]</code>",
-            f"<code>USER: {escape_html(username.upper())}</code>",
-            f"<code>TIME: {now} UTC</code>",
-            f"<code>STATUS: ACTIVE</code>",
-            "<code>" + "="*30 + "</code>",
+            f"Отчёт мониторинга GitHub: <b>{escape_html(username)}</b>",
+            f"Дата последнего изменения:",
+            f"{now}",
+            "----------------------------------------",
+            "",
         ]
 
-        # ── DATA PROCESSING ────────────────────────────────────
+        # ── Только репозитории с изменениями ───────────────────────
         changed_repos = [r for r in repos_data if r.get("recent_commits")][:5]
 
         if not changed_repos:
-            return "<code>[ INFO ] No recent activity detected.</code>", None
+            return "Активности не обнаружено.", None
 
         for repo in changed_repos:
             name = escape_html(repo["name"])
             repo_url = f"https://github.com/{username}/{repo['name']}"
 
-            # REPOSITORY BLOCK
-            lines.append(f"<b>REPOSITORY: {name}</b>")
+            # Заголовок репозитория
+            lines.append(f"<b>Репозиторий: {name}</b>")
             
-            # Action button
-            buttons.append([{"text": f"VIEW: {repo['name']}", "url": repo_url}])
+            # Кнопка для перехода
+            buttons.append([{"text": f"Открыть {repo['name']}", "url": repo_url}])
 
-            # COMMITS SECTION
+            # Коммиты
             commits = repo.get("recent_commits", [])[:2]
             if commits:
-                lines.append("<code>" + "-"*30 + "</code>")
-                lines.append("<code>RECENT_COMMITS:</code>")
+                lines.append("\n<b>Изменённые файлы</b>\n")
                 
                 for c in commits:
                     sha = escape_html(c["sha"][:7])
-                    msg = escape_html(truncate(c["message"], 50))
+                    msg = escape_html(c["message"])
                     auth = escape_html(c["author"])
                     url = c["html_url"]
                     
-                    lines.append(f"<code>- [{sha}] {msg}</code>")
-                    lines.append(f"<code>  AUTH: {auth}</code>")
-                    
-                    # FILES DATA
+                    # Дерево файлов (как на скрине)
                     files = c.get("files", [])
                     if files:
                         tree = build_file_tree(files[:5])
                         if tree.strip():
                             lines.append(html_code_block(tree))
                         
-                        # COMPACT FILE LINKS
+                        # Ссылки на файлы
                         file_links = []
                         for f in files[:3]:
-                            filename = escape_html(f["filename"].split('/')[-1])
+                            filename = escape_html(f["filename"])
                             file_url = escape_html(build_github_file_url(c["html_url"], f["filename"], f))
-                            file_links.append(f"<a href=\"{file_url}\">[{filename}]</a>")
+                            file_links.append(f"• <a href=\"{file_url}\">{filename}</a>")
                         
                         if file_links:
-                            lines.append(f"<code>FILES:</code> {' '.join(file_links)}")
+                            lines.append("\n<b>Ссылки на файлы:</b>")
+                            lines.extend(file_links)
+                    
+                    lines.append(f"\nКоммит: <a href=\"{escape_html(url)}\"><code>{sha}</code></a>")
+                    lines.append(f"Автор: {auth}")
+                    lines.append(f"Сообщение: {msg}")
                     lines.append("")
 
-            # RELEASES & PRs (Simplified)
+            # Релизы
             releases = repo.get("releases", [])
             if releases:
-                lines.append("<code>LATEST_RELEASES:</code>")
-                rel_text = "\n".join([f"TAG: {r['tag']} | {truncate(r['name'], 30)}" for r in releases[:2]])
+                lines.append("<b>Новые релизы:</b>")
+                rel_text = "\n".join([f"{r['tag']} - {r['name']}" for r in releases[:2]])
                 lines.append(html_code_block(rel_text))
 
+            # PRs
             prs = repo.get("open_prs", [])
             if prs:
-                lines.append("<code>OPEN_PULL_REQUESTS:</code>")
-                pr_text = "\n".join([f"#{p['number']} {truncate(p['title'], 40)}" for p in prs[:2]])
+                lines.append("<b>Pull Requests:</b>")
+                pr_text = "\n".join([f"#{p['number']} {p['title']}" for p in prs[:2]])
                 lines.append(html_code_block(pr_text))
 
-            lines.append("<code>" + "="*30 + "</code>")
+            lines.append("----------------------------------------")
 
         reply_markup = {"inline_keyboard": buttons} if buttons else None
         return "\n".join(lines), reply_markup

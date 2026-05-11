@@ -72,10 +72,10 @@ def test_message_builder_has_no_markdown_fences_and_keeps_links():
     assert "```" not in message
     assert "<pre>" in message and "</pre>" in message
     assert "https://github.com/owner/repo/blob/abc1234/docs/changelog.md" in message
-    assert "SYSTEM REPORT" in message
+    assert "Отчёт мониторинга" in message
     assert markup is not None
     assert "inline_keyboard" in markup
-    assert "VIEW: repo" in markup["inline_keyboard"][0][0]["text"]
+    assert "Открыть repo" in markup["inline_keyboard"][0][0]["text"]
 
 
 if __name__ == "__main__":
