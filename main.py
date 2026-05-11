@@ -495,7 +495,9 @@ class MessageBuilder:
                         
                         lines.append(f"<a href=\"{url}\"><code>{sha}</code></a>")
                         lines.append(f"```")
+                        lines.append(f"")
                         lines.append(f"{msg}")
+                        lines.append(f"")
                         lines.append(f"```")
                         lines.append(f"Автор: {auth} | {date}")
                         
