@@ -578,25 +578,44 @@ class MessageBuilder:
             commits = repo.get("recent_commits", [])[:3]  # Только 3 коммита
             if commits:
                 lines.append("<h3>Modified files</h3>")
-                lines.append("<pre>")
                 
                 for c in commits:
                     sha = escape_html(c["sha"])
                     msg = escape_html(c["message"])
+                    auth = escape_html(c["author"])
                     date = fmt_date(c["date"])
                     url = c["html_url"]
                     
                     # Формат: коммит + сообщение
-                    lines.append(f"{sha} {msg} ({date})")
+                    lines.append(f"<pre><code>{sha} {msg} ({date})</code></pre>")
                     
                     # Измененные файлы (только если есть)
                     files = c.get("files", [])
                     if files:
-                        tree = build_file_tree(files[:3])  # Только 3 файла
+                        lines.append("Измененные файлы:")
+                        
+                        # Красивое дерево файлов
+                        tree = build_file_tree(files[:5])  # Показываем до 5 файлов
                         if tree.strip():
-                            lines.append(tree)
-                
-                lines.append("</pre>")
+                            lines.append(f"<pre><code>{tree}</code></pre>")
+                        
+                        # Ссылки на файлы
+                        lines.append("Ссылки на файлы:")
+                        for f in files[:3]:  # Показываем до 3 файлов
+                            filename = escape_html(f["filename"])
+                            changes = f.get("changes", 0)
+                            additions = f.get("additions", 0)
+                            deletions = f.get("deletions", 0)
+                            
+                            # Ссылка на файл в GitHub
+                            file_url = f"{url.replace('/commit/', '/blob/')}/{f['filename']}"
+                            
+                            if changes > 0:
+                                lines.append(f"• <a href=\"{file_url}\">{filename}</a> (+{additions}/-{deletions})")
+                            else:
+                                lines.append(f"• <a href=\"{file_url}\">{filename}</a>")
+                    
+                    lines.append("")
 
             # Релизы (только если есть)
             releases = repo.get("releases", [])
@@ -606,9 +625,11 @@ class MessageBuilder:
                 for rel in releases:
                     tag = escape_html(rel["tag"])
                     name = escape_html(rel["name"])
+                    author = escape_html(rel["author"])
                     date = fmt_date(rel["published_at"])
                     url = rel["html_url"]
-                    lines.append(f"<a href=\"{url}\">{tag}</a> - {name} ({date})")
+                    lines.append(f"<a href=\"{url}\">{tag}</a> - {name}")
+                    lines.append(f"Автор: {author} | {date}")
                 lines.append("</pre>")
 
             # PRs (только если есть)
@@ -620,7 +641,9 @@ class MessageBuilder:
                     num = pr["number"]
                     title = escape_html(pr["title"])
                     author = escape_html(pr["author"])
-                    lines.append(f"#{num} {title} (by {author})")
+                    date = fmt_date(pr["date"])
+                    lines.append(f"#{num} {title}")
+                    lines.append(f"Автор: {author} | {date}")
                 lines.append("</pre>")
 
             lines.append("<hr>\n\n")
