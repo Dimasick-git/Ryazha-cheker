@@ -463,17 +463,18 @@ class TelegramClient:
             print(f"❌ Исключение getMe: {e}")
             return False
 
-    def send(self, text: str, parse_mode: str = "HTML") -> bool:
+    def send(self, text: str, parse_mode: str = "HTML", disable_web_page_preview: bool = True, reply_markup: Optional[Dict] = None) -> bool:
         """
         Отправляет сообщение.
         Автоматически разбивает на части если > 4096 символов.
         """
         parts = self._split(text)
         print(f"📤 Отправка {len(parts)} части(ей) в чат {self.chat_id}")
-
         all_ok = True
         for i, part in enumerate(parts, 1):
-            ok = self._send_part(part, parse_mode)
+            # Кнопки шлём только с последней частью
+            current_markup = reply_markup if i == len(parts) else None
+            ok = self._send_part(part, parse_mode, disable_web_page_preview, current_markup)
             if ok:
                 print(f"  ✅ Часть {i}/{len(parts)} отправлена ({len(part)} символов)")
             else:
@@ -492,15 +493,17 @@ class TelegramClient:
 
         return all_ok
 
-    def _send_part(self, text: str, parse_mode: Optional[str]) -> bool:
+    def _send_part(self, text: str, parse_mode: Optional[str], disable_web_page_preview: bool = True, reply_markup: Optional[Dict] = None) -> bool:
         """Отправляет одну часть сообщения."""
         payload: Dict[str, Any] = {
             "chat_id": self.chat_id,
             "text":    text,
+            "disable_web_page_preview": disable_web_page_preview,
         }
         if parse_mode:
             payload["parse_mode"] = parse_mode
-
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         try:
             resp = self.session.post(
                 f"{self.base}/sendMessage",
@@ -576,14 +579,16 @@ class MessageBuilder:
     """Строит HTML сообщение для Telegram."""
 
     @staticmethod
-    def build(username: str, repos_data: List[Dict]) -> str:
+    def build(username: str, repos_data: List[Dict]) -> tuple[str, Optional[Dict]]:
         lines = []
+        buttons = []
 
         # ── Заголовок ──────────────────────────────────────────
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
         lines += [
-            f"<b>Archive Comparison Report for {escape_html(username)}</b>",
-            f"<b>Last archive modification date:</b> {now}",
+            f"<b>🚀 GitHub Monitor Report</b>",
+            f"👤 User: <b>{escape_html(username)}</b>",
+            f"📅 Time: <code>{now} UTC</code>",
             "────────────────────",
         ]
 
@@ -591,92 +596,80 @@ class MessageBuilder:
         changed_repos = [r for r in repos_data if r.get("recent_commits")][:5]
 
         if not changed_repos:
-            return "<b>No recent activity found</b>"
+            return "<b>📭 No recent activity found</b>", None
 
         for repo in changed_repos:
             name = escape_html(repo["name"])
             desc = repo.get("description") or ""
+            repo_url = f"https://github.com/{username}/{repo['name']}"
 
             # Заголовок репозитория
-            lines.append(f"<b>{name}.zip</b>")
-            
+            lines.append(f"<b>📦 {name}</b>")
             if desc and desc != "No description":
-                lines.append(f"{escape_html(truncate(desc, 80))}")
+                lines.append(f"<i>{escape_html(truncate(desc, 80))}</i>")
+            
+            # Кнопка для репозитория
+            buttons.append([{"text": f"📂 Open {repo['name']}", "url": repo_url}])
 
             # Коммиты
-            commits = repo.get("recent_commits", [])[:3]
+            commits = repo.get("recent_commits", [])[:2] # Уменьшим до 2 для компактности
             if commits:
-                lines.append("<b>Modified files</b>")
+                lines.append("\n<b>📝 Recent Commits:</b>")
                 
                 for c in commits:
                     sha = escape_html(c["sha"])
                     msg = c["message"]
                     auth = escape_html(c["author"])
-                    date = fmt_date(c["date"])
                     url = c["html_url"]
                     
-                    lines.append(f"<a href=\"{escape_html(url)}\"><code>{sha}</code></a>")
-                    lines.append(html_code_block(msg))
-                    lines.append(f"Автор: {auth} | {date}")
+                    lines.append(f"• <a href=\"{escape_html(url)}\"><code>{sha}</code></a> {escape_html(msg)}")
+                    lines.append(f"  └ 👤 {auth}")
                     
                     # Измененные файлы
                     files = c.get("files", [])
                     if files:
-                        lines.append("Измененные файлы:")
-                        
                         # Дерево файлов
                         tree = build_file_tree(files[:5])
                         if tree.strip():
                             lines.append(html_code_block(tree))
                         
-                        # Ссылки на файлы
-                        lines.append("Ссылки на файлы:")
+                        # Ссылки на файлы (компактно)
+                        file_links = []
                         for f in files[:3]:
-                            filename = escape_html(f["filename"])
-                            changes = f.get("changes", 0)
-                            additions = f.get("additions", 0)
-                            deletions = f.get("deletions", 0)
-                            
+                            filename = escape_html(f["filename"].split('/')[-1])
                             file_url = escape_html(build_github_file_url(c["html_url"], f["filename"], f))
-                            
-                            if changes > 0:
-                                lines.append(f"• <a href=\"{file_url}\">{filename}</a> (+{additions}/-{deletions})")
-                            else:
-                                lines.append(f"• <a href=\"{file_url}\">{filename}</a>")
-                    
+                            file_links.append(f"<a href=\"{file_url}\">{filename}</a>")
+                        
+                        if file_links:
+                            lines.append(f"🔗 {' | '.join(file_links)}")
                     lines.append("")
 
             # Релизы
             releases = repo.get("releases", [])
             if releases:
-                lines.append("<b>Added files/folders</b>")
+                lines.append("<b>🏷 Latest Releases:</b>")
                 release_lines = []
                 for rel in releases:
                     tag = rel["tag"]
                     name = rel["name"]
-                    author = rel["author"]
-                    date = fmt_date(rel["published_at"])
-                    release_lines.append(f"{tag} - {name}")
-                    release_lines.append(f"Автор: {author} | {date}")
+                    release_lines.append(f"🚀 {tag}: {name}")
                 lines.append(html_code_block("\n".join(release_lines)))
 
             # PRs
             prs = repo.get("open_prs", [])
             if prs:
-                lines.append("<b>Removed files/folders</b>")
+                lines.append("<b>Pull Requests:</b>")
                 pr_lines = []
                 for pr in prs[:2]:
                     num = pr["number"]
                     title = pr["title"]
-                    author = pr["author"]
-                    date = fmt_date(pr["date"])
                     pr_lines.append(f"#{num} {title}")
-                    pr_lines.append(f"Автор: {author} | {date}")
                 lines.append(html_code_block("\n".join(pr_lines)))
 
-            lines.append("────────────────────\n")
+            lines.append("────────────────────")
 
-        return "\n".join(lines)
+        reply_markup = {"inline_keyboard": buttons} if buttons else None
+        return "\n".join(lines), reply_markup
 
 
 # ──────────────────────────────────────────────────────────────
@@ -834,12 +827,11 @@ class GitHubMonitor:
         # Формируем и отправляем сообщение
         print()
         print("Формирование сообщения...")
-        message = MessageBuilder.build(self.username, repos_data)
+        message, markup = MessageBuilder.build(self.username, repos_data)
         print(f"Длина сообщения: {len(message)} символов")
-
         print()
         print("Отправка в Telegram...")
-        success = self.telegram.send(message)
+        success = self.telegram.send(message, reply_markup=markup)
 
         print()
         if success:

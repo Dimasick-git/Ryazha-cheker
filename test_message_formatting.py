@@ -39,7 +39,7 @@ def test_file_url_falls_back_to_commit_sha_not_main_branch():
 
 
 def test_message_builder_has_no_markdown_fences_and_keeps_links():
-    message = MessageBuilder.build(
+    message, markup = MessageBuilder.build(
         "owner",
         [
             {
@@ -73,6 +73,9 @@ def test_message_builder_has_no_markdown_fences_and_keeps_links():
     assert "<pre>" in message and "</pre>" in message
     assert "https://github.com/owner/repo/blob/abc1234/docs/changelog.md" in message
     assert "<h3>" not in message and "<hr>" not in message
+    assert markup is not None
+    assert "inline_keyboard" in markup
+    assert markup["inline_keyboard"][0][0]["text"] == "📂 Open repo"
 
 
 if __name__ == "__main__":
