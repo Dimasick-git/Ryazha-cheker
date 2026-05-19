@@ -10,6 +10,7 @@ import time
 import requests
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from urllib.parse import quote
@@ -37,7 +38,6 @@ API_DELAY          = 0.5   # секунд
 # ──────────────────────────────────────────────────────────────
 # HELPERS
 # ──────────────────────────────────────────────────────────────
-import json
 
 def escape_html(text: str) -> str:
     """Экранирует спецсимволы для HTML parse_mode."""
@@ -500,6 +500,8 @@ class TelegramClient:
             payload["parse_mode"] = parse_mode
         if reply_markup:
             payload["reply_markup"] = reply_markup
+        if self.topic_id:
+            payload["message_thread_id"] = self.topic_id
         try:
             resp = self.session.post(
                 f"{self.base}/sendMessage",
@@ -557,7 +559,6 @@ class TelegramClient:
     @staticmethod
     def _strip_html(text: str) -> str:
         """Убирает HTML теги для plain text fallback."""
-        import re
         clean = re.sub(r"<[^>]+>", "", text)
         return (
             clean
