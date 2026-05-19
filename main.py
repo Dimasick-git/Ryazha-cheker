@@ -562,84 +562,91 @@ class MessageBuilder:
 
     @staticmethod
     def build(username: str, repos_data: List[Dict]) -> tuple[str, Optional[Dict]]:
-        lines = []
-        buttons = []
+        lines: List[str] = []
+        buttons: List[List[Dict]] = []
 
-        # ── Заголовок ──────────────────────────────────────────
-        now = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M")
+        now = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
         lines += [
-            f"Отчёт мониторинга GitHub: <b>{escape_html(username)}</b>",
-            f"Дата последнего изменения:",
-            f"{now}",
-            "----------------------------------------",
+            f"🔔 <b>GitHub Monitor</b> — <code>{escape_html(username)}</code>",
+            f"🕐 {now}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
             "",
         ]
 
-        # ── Только репозитории с изменениями ───────────────────────
         changed_repos = [r for r in repos_data if r.get("recent_commits")][:5]
 
         if not changed_repos:
-            return "Активности не обнаружено.", None
+            return "✅ Активности не обнаружено.", None
+
+        total_commits = sum(len(r.get("recent_commits", [])) for r in changed_repos)
+        lines.append(f"📦 Репозиториев с изменениями: <b>{len(changed_repos)}</b>  |  📝 Новых коммитов: <b>{total_commits}</b>\n")
 
         for repo in changed_repos:
             name = escape_html(repo["name"])
+            lang = escape_html(repo.get("language") or "Unknown")
+            stars = repo.get("stars", 0)
             repo_url = f"https://github.com/{username}/{repo['name']}"
 
-            # Заголовок репозитория
-            lines.append(f"<b>Репозиторий: {name}</b>")
-            
-            # Кнопка для перехода
-            buttons.append([{"text": f"Открыть {repo['name']}", "url": repo_url}])
+            lines.append(f"📁 <b>{name}</b>  <i>{lang}</i>  ⭐{stars}")
+            buttons.append([{"text": f"🔗 {repo['name']}", "url": repo_url}])
 
             # Коммиты
             commits = repo.get("recent_commits", [])[:2]
             if commits:
-                lines.append("\n<b>Изменённые файлы</b>\n")
-                
+                lines.append("<b>Изменения:</b>")
                 for c in commits:
                     sha = escape_html(c["sha"][:7])
                     msg = escape_html(c["message"])
                     auth = escape_html(c["author"])
-                    url = c["html_url"]
-                    
-                    # Дерево файлов (как на скрине)
+                    date = escape_html(fmt_date(c["date"]))
+                    url = escape_html(c["html_url"])
+
+                    lines.append(f"  • <a href=\"{url}\"><code>{sha}</code></a> {msg}")
+                    lines.append(f"    👤 {auth}  🕐 {date}")
+
                     files = c.get("files", [])
                     if files:
                         tree = build_file_tree(files[:5])
                         if tree.strip():
                             lines.append(html_code_block(tree))
-                        
-                        # Ссылки на файлы
+
                         file_links = []
                         for f in files[:3]:
-                            filename = escape_html(f["filename"])
-                            file_url = escape_html(build_github_file_url(c["html_url"], f["filename"], f))
-                            file_links.append(f"• <a href=\"{file_url}\">{filename}</a>")
-                        
+                            fname = escape_html(f["filename"])
+                            furl = escape_html(build_github_file_url(c["html_url"], f["filename"], f))
+                            file_links.append(f"    📄 <a href=\"{furl}\">{fname}</a>")
                         if file_links:
-                            lines.append("\n<b>Ссылки на файлы:</b>")
                             lines.extend(file_links)
-                    
-                    lines.append(f"\nКоммит: <a href=\"{escape_html(url)}\"><code>{sha}</code></a>")
-                    lines.append(f"Автор: {auth}")
-                    lines.append(f"Сообщение: {msg}")
+
                     lines.append("")
+
+            # CI / Workflow runs
+            workflows = repo.get("workflow_runs", [])
+            if workflows:
+                wf_parts = []
+                for w in workflows[:3]:
+                    icon = workflow_icon(w.get("conclusion"), w.get("status", ""))
+                    wf_name = escape_html(truncate(w["name"], 30))
+                    wf_url = escape_html(w["html_url"])
+                    wf_parts.append(f"{icon} <a href=\"{wf_url}\">{wf_name}</a>")
+                lines.append("<b>CI:</b> " + "  |  ".join(wf_parts))
 
             # Релизы
             releases = repo.get("releases", [])
             if releases:
-                lines.append("<b>Новые релизы:</b>")
-                rel_text = "\n".join([f"{r['tag']} - {r['name']}" for r in releases[:2]])
-                lines.append(html_code_block(rel_text))
+                r = releases[0]
+                tag = escape_html(r["tag"])
+                rname = escape_html(r["name"])
+                rurl = escape_html(r["html_url"])
+                lines.append(f"🚀 <b>Релиз:</b> <a href=\"{rurl}\">{tag}</a> — {rname}")
 
             # PRs
             prs = repo.get("open_prs", [])
             if prs:
-                lines.append("<b>Pull Requests:</b>")
-                pr_text = "\n".join([f"#{p['number']} {p['title']}" for p in prs[:2]])
-                lines.append(html_code_block(pr_text))
+                pr_parts = [f"#{p['number']} {escape_html(p['title'])}" for p in prs[:2]]
+                lines.append(f"🔀 <b>PR:</b> " + " | ".join(pr_parts))
 
-            lines.append("----------------------------------------")
+            lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
 
         reply_markup = {"inline_keyboard": buttons} if buttons else None
         return "\n".join(lines), reply_markup
@@ -648,9 +655,27 @@ class MessageBuilder:
 # ──────────────────────────────────────────────────────────────
 # MONITOR
 # ──────────────────────────────────────────────────────────────
+WORKFLOW_ICONS = {
+    "success":   "✅",
+    "failure":   "❌",
+    "cancelled": "⛔",
+    "skipped":   "⏭️",
+    "in_progress": "🔄",
+    "queued":    "⏳",
+    "waiting":   "⏳",
+    "running":   "🔄",
+    None:        "❓",
+}
+
+
+def workflow_icon(conclusion: Optional[str], status: str) -> str:
+    if status in ("in_progress", "queued", "waiting"):
+        return WORKFLOW_ICONS.get(status, "🔄")
+    return WORKFLOW_ICONS.get(conclusion, WORKFLOW_ICONS[None])
+
+
 class GitHubMonitor:
     def __init__(self):
-        # Читаем env
         try:
             from dotenv import load_dotenv
             load_dotenv()
@@ -662,7 +687,10 @@ class GitHubMonitor:
         self.chat_id      = os.getenv("TELEGRAM_CHAT_ID", "").strip()
         self.username     = os.getenv("G_USERNAME", "Dimasick-git").strip()
 
-        # Валидация
+        # Comma-separated list of repo names to skip, e.g. "Ryazhahand-Overlay,Sys-clk,Atmosphere"
+        skip_raw = os.getenv("SKIP_REPOS", "").strip()
+        self.skip_repos: set = {r.strip() for r in skip_raw.split(",") if r.strip()}
+
         missing = []
         if not github_token:   missing.append("G_TOKEN")
         if not telegram_token: missing.append("TELEGRAM_BOT_TOKEN")
@@ -675,32 +703,31 @@ class GitHubMonitor:
 
         self.github   = GitHubClient(github_token, self.username)
         self.telegram = TelegramClient(
-            telegram_token, 
-            self.chat_id, 
+            telegram_token,
+            self.chat_id,
             topic_id=os.getenv("TELEGRAM_TOPIC_ID", "").strip() or None
         )
 
     def run(self):
         print(f"Запуск GitHub монитора для: {self.username}")
         print(f"Время: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        if self.skip_repos:
+            print(f"Пропускаем репозитории: {', '.join(sorted(self.skip_repos))}")
         print()
 
-        # Проверка новых релизов
+        # Быстрая проверка — были ли вообще обновления
         print("Проверка новых релизов...")
         latest_update = check_for_new_releases(self.username)
         last_check = load_last_check_date()
-        
+
         if latest_update and last_check and latest_update == last_check:
             print(f"Новых релизов не найдено. Последнее обновление: {latest_update}")
             print("Мониторинг не требуется. Выход.")
             return
-        
+
         if latest_update:
             print(f"Обнаружены новые изменения! Последнее обновление: {latest_update}")
-            if last_check:
-                print(f"Предыдущая проверка: {last_check}")
-            else:
-                print("Первая проверка")
+            print(f"Предыдущая проверка: {last_check or 'первая'}")
 
         # Валидируем Telegram бота
         print()
@@ -723,6 +750,8 @@ class GitHubMonitor:
             )
             sys.exit(0)
 
+        # Фильтруем пропускаемые репозитории
+        repositories = [r for r in repositories if r["name"] not in self.skip_repos]
         print(f"Найдено репозиториев: {len(repositories)}")
 
         # Собираем детальную информацию
