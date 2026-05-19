@@ -26,6 +26,14 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
+      # ── Восстанавливаем last_check.json из кэша ───────────────
+      - name: Restore monitor state
+        uses: actions/cache@v4
+        with:
+          path: last_check.json
+          key: monitor-state-${{ github.ref_name }}
+          restore-keys: monitor-state-
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -100,88 +108,7 @@ jobs:
           echo ""
           echo "✅ All secrets validated"
 
-      # ── ШАГ 2: Прямой тест Telegram API ───────────────────────
-      - name: Test Telegram API directly
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          set -euo pipefail
-
-          echo "::group::Testing Telegram Bot API"
-
-          # Проверяем что бот живой
-          echo "1. Checking bot info (getMe)..."
-          bot_response=$(curl -s \
-            --max-time 15 \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe")
-
-          echo "getMe response: $bot_response"
-
-          if echo "$bot_response" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          if not data.get('ok'):
-              print('ERROR: ' + data.get('description', 'Unknown error'))
-              sys.exit(1)
-          bot = data['result']
-          print(f'Bot name: {bot[\"first_name\"]}')
-          print(f'Bot username: @{bot[\"username\"]}')
-          print(f'Bot ID: {bot[\"id\"]}')
-          "; then
-            echo "✅ Bot token is valid"
-          else
-            echo "::error::Bot token is INVALID"
-            echo "  Get new token from @BotFather in Telegram"
-            exit 1
-          fi
-
-          # Отправляем тестовое сообщение
-          echo ""
-          echo "2. Sending test message to chat $TELEGRAM_CHAT_ID..."
-          send_response=$(curl -s \
-            --max-time 15 \
-            -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"chat_id\": $TELEGRAM_CHAT_ID,
-              \"text\": \"🔧 GitHub Actions test message\nRepo: ${{ github.repository }}\nRun: #${{ github.run_number }}\nTime: $(date -u '+%Y-%m-%d %H:%M UTC')\",
-              \"parse_mode\": \"HTML\"
-            }")
-
-          echo "sendMessage response: $send_response"
-
-          if echo "$send_response" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          if not data.get('ok'):
-              err = data.get('description', 'Unknown error')
-              print('ERROR: ' + err)
-
-              # Подсказки по частым ошибкам
-              if 'chat not found' in err.lower():
-                  print('FIX: Bot is not added to this chat, or CHAT_ID is wrong')
-                  print('     For private chat: send any message to bot first')
-                  print('     For group: add bot to group, send message, use @userinfobot')
-              elif 'bot was blocked' in err.lower():
-                  print('FIX: User blocked the bot. Unblock it in Telegram.')
-              elif 'forbidden' in err.lower():
-                  print('FIX: Bot has no permission to write to this chat')
-              sys.exit(1)
-          msg = data['result']
-          print(f'Message sent! ID: {msg[\"message_id\"]}')
-          print(f'Chat ID confirmed: {msg[\"chat\"][\"id\"]}')
-          "; then
-            echo "✅ Test message sent successfully"
-          else
-            echo "::error::Failed to send message"
-            exit 1
-          fi
-
-          echo "::endgroup::"
-
-      # ── ШАГ 3: Запуск основного скрипта с подробным логом ─────
+      # ── ШАГ 2: Запуск основного скрипта с подробным логом ─────
       - name: Run GitHub Monitor
         env:
           G_TOKEN:              ${{ secrets.G_TOKEN }}
@@ -196,7 +123,6 @@ jobs:
           echo "::group::Running main.py"
           echo "Started at: $(date -u)"
 
-          # Запускаем с выводом traceback при падении
           python3 -u main.py
           exit_code=$?
 
@@ -208,6 +134,16 @@ jobs:
             echo "::error::main.py exited with code $exit_code"
             exit $exit_code
           fi
+
+      # ── ШАГ 3: Сохраняем last_check.json в кэш ────────────────
+      # actions/cache@v4 автоматически сохраняет кэш после job.
+      # Чтобы обновлять кэш при каждом прогоне используем save-always.
+      - name: Save monitor state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: last_check.json
+          key: monitor-state-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: Summary
         if: always()
