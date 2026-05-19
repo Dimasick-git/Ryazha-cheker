@@ -268,7 +268,7 @@ class GitHubClient:
         self.username = username
         self.session  = requests.Session()
         self.session.headers.update({
-            "Authorization": f"token {token}",
+            "Authorization": f"Bearer {token}",
             "Accept":        "application/vnd.github.v3+json",
             "User-Agent":    f"GitHubMonitor/{username}",
         })
@@ -665,6 +665,12 @@ class MessageBuilder:
 class GitHubMonitor:
     def __init__(self):
         # Читаем env
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except ImportError:
+            pass
+
         github_token      = os.getenv("G_TOKEN", "").strip()
         telegram_token    = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
         self.chat_id      = os.getenv("TELEGRAM_CHAT_ID", "").strip()
