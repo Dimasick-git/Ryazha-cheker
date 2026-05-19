@@ -179,26 +179,6 @@ def save_repository_state(username: str, repo_name: str, state: Dict[str, Any]) 
         print(f'Ошибка сохранения состояния репозитория: {e}')
 
 
-def detect_content_changes(old_commits: List[Dict], new_commits: List[Dict]) -> bool:
-    """Определяет есть ли реальные изменения в содержимом коммитов."""
-    if not old_commits or not new_commits:
-        return True
-    
-    # Сравниваем чек-суммы первых 3 коммитов
-    for i in range(min(3, len(old_commits), len(new_commits))):
-        old_commit = old_commits[i]
-        new_commit = new_commits[i]
-        
-        # Создаем строку для сравнения
-        old_content = f"{old_commit.get('sha', '')}{old_commit.get('message', '')}{old_commit.get('date', '')}"
-        new_content = f"{new_commit.get('sha', '')}{new_commit.get('message', '')}{new_commit.get('date', '')}"
-        
-        if calculate_content_checksum(old_content) != calculate_content_checksum(new_content):
-            return True
-    
-    return False
-
-
 def build_file_tree(files: List[Dict]) -> str:
     """Строит красивое дерево файлов."""
     if not files:
@@ -224,8 +204,6 @@ def build_file_tree(files: List[Dict]) -> str:
                 folders[folder] = []
             folders[folder].append(f)
     
-    # Добавляем корневые файлы
-        # Добавляем корневые файлы
     if root_files:
         for f in root_files:
             changes = f.get("changes", 0)
@@ -273,35 +251,42 @@ class GitHubClient:
             "User-Agent":    f"GitHubMonitor/{username}",
         })
 
-    def _get(self, url: str, params: dict = None) -> Optional[Any]:
-        """GET запрос с обработкой rate limit и ошибок."""
-        try:
-            resp = self.session.get(url, params=params, timeout=20)
-
-            # Rate limit
-            if resp.status_code == 429 or (
-                resp.status_code == 403
-                and "rate limit" in resp.text.lower()
-            ):
-                reset_ts = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
-                wait     = max(reset_ts - int(time.time()), 5)
-                print(f"⚠️  Лимит запросов превышен. Ожидание {wait}с...")
-                time.sleep(wait)
+    def _get(self, url: str, params: dict = None, _retry: int = 3) -> Optional[Any]:
+        """GET запрос с обработкой rate limit (exponential backoff) и ошибок."""
+        delay = 2
+        for attempt in range(1, _retry + 1):
+            try:
                 resp = self.session.get(url, params=params, timeout=20)
 
-            if resp.status_code == 200:
-                return resp.json()
+                if resp.status_code == 429 or (
+                    resp.status_code == 403
+                    and "rate limit" in resp.text.lower()
+                ):
+                    reset_ts = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
+                    wait = max(reset_ts - int(time.time()), delay)
+                    print(f"⚠️  Rate limit (попытка {attempt}/{_retry}). Ожидание {wait}с...")
+                    time.sleep(wait)
+                    delay *= 2
+                    continue
 
-            print(f"❌ Ошибка GitHub API {resp.status_code}: {url}")
-            print(f"   Ответ: {resp.text[:200]}")
-            return None
+                if resp.status_code == 200:
+                    return resp.json()
 
-        except requests.exceptions.Timeout:
-            print(f"⏱️  Таймаут: {url}")
-            return None
-        except requests.exceptions.RequestException as e:
-            print(f"🌐 Ошибка сети: {e}")
-            return None
+                print(f"❌ Ошибка GitHub API {resp.status_code}: {url}")
+                print(f"   Ответ: {resp.text[:200]}")
+                return None
+
+            except requests.exceptions.Timeout:
+                print(f"⏱️  Таймаут (попытка {attempt}/{_retry}): {url}")
+                if attempt < _retry:
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                return None
+            except requests.exceptions.RequestException as e:
+                print(f"🌐 Ошибка сети: {e}")
+                return None
+        return None
 
     def get_repositories(self) -> List[Dict]:
         """Все репозитории пользователя (пагинация)."""
