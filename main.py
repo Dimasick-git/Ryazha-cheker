@@ -115,68 +115,32 @@ def save_last_check_date(date_str: str) -> None:
         print(f'Ошибка сохранения даты последней проверки: {e}')
 
 
-def check_for_new_releases(username: str) -> Optional[str]:
-    """Проверяет наличие новых релизов на GitHub."""
-    try:
-        # Получаем информацию о последнем релизе пользователя
-        response = requests.get(
-            f"{GITHUB_API}/users/{username}/repos",
-            params={"type": "owner", "sort": "updated", "per_page": 10},
-            timeout=20
-        )
-        
-        if response.status_code == 200:
-            repos = response.json()
-            if repos:
-                # Берем дату обновления самого свежего репозитория
-                latest_update = repos[0].get('updated_at', '')
-                if latest_update:
-                    return fmt_date(latest_update)
-        return None
-    except Exception as e:
-        print(f'Ошибка проверки новых релизов: {e}')
-        return None
-
-
 def calculate_content_checksum(content: str) -> str:
     """Вычисляет чек-сумму содержимого."""
     return hashlib.md5(content.encode('utf-8')).hexdigest()
 
 
-def load_repository_state(username: str, repo_name: str) -> Dict[str, Any]:
-    """Загружает состояние репозитория из файла."""
+def load_all_repository_states(username: str) -> Dict[str, Any]:
+    """Загружает все состояния репозиториев из файла одним чтением."""
     try:
         state_file = f"repo_states_{username}.json"
         if os.path.exists(state_file):
             with open(state_file, 'r', encoding='utf-8') as f:
-                states = json.load(f)
-                return states.get(repo_name, {})
+                return json.load(f)
         return {}
     except Exception as e:
-        print(f'Ошибка загрузки состояния репозитория: {e}')
+        print(f'Ошибка загрузки состояний репозиториев: {e}')
         return {}
 
 
-def save_repository_state(username: str, repo_name: str, state: Dict[str, Any]) -> None:
-    """Сохраняет состояние репозитория в файл."""
+def save_all_repository_states(username: str, states: Dict[str, Any]) -> None:
+    """Сохраняет все состояния репозиториев одной записью."""
     try:
         state_file = f"repo_states_{username}.json"
-        states = {}
-        
-        # Загружаем существующие состояния
-        if os.path.exists(state_file):
-            with open(state_file, 'r', encoding='utf-8') as f:
-                states = json.load(f)
-        
-        # Обновляем состояние конкретного репозитория
-        states[repo_name] = state
-        
-        # Сохраняем все состояния
         with open(state_file, 'w', encoding='utf-8') as f:
             json.dump(states, f, ensure_ascii=False, indent=2)
-            
     except Exception as e:
-        print(f'Ошибка сохранения состояния репозитория: {e}')
+        print(f'Ошибка сохранения состояний репозиториев: {e}')
 
 
 def build_file_tree(files: List[Dict]) -> str:
@@ -414,6 +378,17 @@ class GitHubClient:
             except (KeyError, TypeError):
                 continue
         return result
+
+    def get_latest_repo_update(self) -> Optional[str]:
+        """Быстрая проверка: дата обновления самого свежего репо (для раннего выхода)."""
+        data = self._get(
+            f"{GITHUB_API}/users/{self.username}/repos",
+            params={"type": "owner", "sort": "updated", "per_page": 1},
+        )
+        if data and isinstance(data, list) and data:
+            updated_at = data[0].get("updated_at", "")
+            return fmt_date(updated_at) if updated_at else None
+        return None
 
 
 # ──────────────────────────────────────────────────────────────
@@ -715,9 +690,9 @@ class GitHubMonitor:
             print(f"Пропускаем репозитории: {', '.join(sorted(self.skip_repos))}")
         print()
 
-        # Быстрая проверка — были ли вообще обновления
+        # Быстрая проверка — были ли вообще обновления (использует авторизованную сессию)
         print("Проверка новых релизов...")
-        latest_update = check_for_new_releases(self.username)
+        latest_update = self.github.get_latest_repo_update()
         last_check = load_last_check_date()
 
         if latest_update and last_check and latest_update == last_check:
@@ -760,12 +735,15 @@ class GitHubMonitor:
         repos_data = []
         has_real_changes = False
 
+        # Загружаем все состояния одним чтением файла
+        all_states = load_all_repository_states(self.username)
+
         for i, repo in enumerate(repositories, 1):
             name = repo["name"]
             print(f"[{i:2d}/{len(repositories)}] {name}", end="", flush=True)
 
-            # Загружаем предыдущее состояние
-            old_state = load_repository_state(self.username, name)
+            # Берём состояние из уже загруженного словаря
+            old_state = all_states.get(name, {})
             
             # Базовые данные из списка
             info: Dict[str, Any] = {
@@ -819,16 +797,15 @@ class GitHubMonitor:
                 has_real_changes = True
                 print(f" [НОВЫЕ КОММИТЫ: {len(new_commits)}]")
                 
-            # Всегда обновляем список известных SHA, чтобы не слать их в следующий раз
-            # Объединяем старые SHA с новыми из текущего запроса
+            # Обновляем список известных SHA в памяти (сохраним всё одним вызовом в конце)
             all_current_shas = [c.get("sha") for c in all_commits if c.get("sha")]
             updated_shas = list(set(known_shas) | set(all_current_shas))
-            
+
             # Ограничиваем список последних 100 SHA, чтобы файл не раздувался
-            save_repository_state(self.username, name, {
+            all_states[name] = {
                 "known_shas": updated_shas[-100:],
                 "last_check": datetime.now(timezone.utc).isoformat()
-            })
+            }
             
             if not new_commits:
                 print(" [без изменений]")
@@ -836,6 +813,9 @@ class GitHubMonitor:
             # Добавляем в отчет только если есть что показать
             if new_commits or prs or releases:
                 repos_data.append(info)
+
+        # Сохраняем все обновлённые состояния одной записью
+        save_all_repository_states(self.username, all_states)
 
         if not has_real_changes:
             print()
