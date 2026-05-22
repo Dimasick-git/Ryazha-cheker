@@ -7,6 +7,7 @@ GitHub Repository Monitor
 import os
 import sys
 import time
+import tempfile
 import requests
 import hashlib
 import json
@@ -105,11 +106,21 @@ def load_last_check_date() -> Optional[str]:
         return None
 
 
+def _atomic_json_write(path: str, data: Any) -> None:
+    """Пишет JSON атомарно через временный файл (защита от обрыва записи)."""
+    dir_name = os.path.dirname(os.path.abspath(path)) or '.'
+    with tempfile.NamedTemporaryFile(
+        mode='w', encoding='utf-8', dir=dir_name, delete=False, suffix='.tmp'
+    ) as tmp:
+        json.dump(data, tmp, ensure_ascii=False, indent=2)
+        tmp_path = tmp.name
+    os.replace(tmp_path, path)  # atomic on POSIX
+
+
 def save_last_check_date(date_str: str) -> None:
     """Сохраняет дату последней проверки в JSON файл."""
     try:
-        with open('last_check.json', 'w', encoding='utf-8') as f:
-            json.dump({'last_check_date': date_str}, f, ensure_ascii=False, indent=2)
+        _atomic_json_write('last_check.json', {'last_check_date': date_str})
         print(f'Дата последней проверки обновлена: {date_str}')
     except Exception as e:
         print(f'Ошибка сохранения даты последней проверки: {e}')
@@ -137,8 +148,7 @@ def save_all_repository_states(username: str, states: Dict[str, Any]) -> None:
     """Сохраняет все состояния репозиториев одной записью."""
     try:
         state_file = f"repo_states_{username}.json"
-        with open(state_file, 'w', encoding='utf-8') as f:
-            json.dump(states, f, ensure_ascii=False, indent=2)
+        _atomic_json_write(state_file, states)
     except Exception as e:
         print(f'Ошибка сохранения состояний репозиториев: {e}')
 
@@ -272,8 +282,8 @@ class GitHubClient:
 
         return all_repos
 
-    def get_recent_commits(self, repo: str, count: int = 3) -> List[Dict]:
-        """Последние N коммитов репозитория."""
+    def list_commits(self, repo: str, count: int = 5) -> List[Dict]:
+        """Список последних N коммитов без загрузки изменённых файлов (1 API-запрос)."""
         data = self._get(
             f"{GITHUB_API}/repos/{self.username}/{repo}/commits",
             params={"per_page": count},
@@ -284,35 +294,38 @@ class GitHubClient:
         result = []
         for c in data[:count]:
             try:
-                # Получаем информацию об измененных файлах
-                files_data = self._get(
-                    f"{GITHUB_API}/repos/{self.username}/{repo}/commits/{c['sha']}"
-                )
-                
-                files = []
-                if files_data and "files" in files_data:
-                    for f in files_data["files"][:5]:  # Показываем до 5 файлов
-                        files.append({
-                            "filename": f["filename"],
-                            "changes": f.get("changes", 0),
-                            "additions": f.get("additions", 0),
-                            "deletions": f.get("deletions", 0),
-                            "status": f.get("status", "modified"),
-                            "blob_url": f.get("blob_url"),
-                            "raw_url": f.get("raw_url"),
-                            "patch": f.get("patch", "")[:200]  # Обрезаем патч
-                        })
-                
                 result.append({
-                    "sha":     c["sha"][:7],
-                    "message": truncate(c["commit"]["message"].split("\n")[0], 60),
-                    "author":  truncate(c["commit"]["author"]["name"], 25),
-                    "date":    c["commit"]["author"]["date"],
+                    "sha":      c["sha"][:7],
+                    "full_sha": c["sha"],
+                    "message":  truncate(c["commit"]["message"].split("\n")[0], 60),
+                    "author":   truncate(c["commit"]["author"]["name"], 25),
+                    "date":     c["commit"]["author"]["date"],
                     "html_url": c["html_url"],
-                    "files":   files
+                    "files":    [],
                 })
             except (KeyError, TypeError):
                 continue
+        return result
+
+    def get_commit_files(self, repo: str, sha: str) -> List[Dict]:
+        """Загружает список изменённых файлов для одного конкретного коммита."""
+        data = self._get(
+            f"{GITHUB_API}/repos/{self.username}/{repo}/commits/{sha}"
+        )
+        if not data or "files" not in data:
+            return []
+        result = []
+        for f in data["files"][:5]:
+            result.append({
+                "filename":  f["filename"],
+                "changes":   f.get("changes", 0),
+                "additions": f.get("additions", 0),
+                "deletions": f.get("deletions", 0),
+                "status":    f.get("status", "modified"),
+                "blob_url":  f.get("blob_url"),
+                "raw_url":   f.get("raw_url"),
+                "patch":     f.get("patch", "")[:200],
+            })
         return result
 
     def get_open_prs(self, repo: str, count: int = 3) -> List[Dict]:
@@ -390,19 +403,17 @@ class GitHubClient:
             return fmt_date(updated_at) if updated_at else None
         return None
 
-    def get_open_issues_count(self, repo: str) -> int:
-        """Количество открытых issues (без PR) репозитория."""
-        data = self._get(
-            f"{GITHUB_API}/repos/{self.username}/{repo}",
-        )
+    def get_open_issues_count(self, repo: str, open_issues_raw: int = -1, pr_count: int = 0) -> int:
+        """Количество открытых issues (без PR).
+
+        Если open_issues_raw передан (из уже загруженного списка репо), API-запрос
+        не делается — экономим лимит. Иначе запрашивает репо отдельно.
+        """
+        if open_issues_raw >= 0:
+            return max(0, open_issues_raw - pr_count)
+        data = self._get(f"{GITHUB_API}/repos/{self.username}/{repo}")
         if data and isinstance(data, dict):
-            # open_issues_count включает PR, поэтому вычитаем PR
             total = data.get("open_issues_count", 0)
-            prs = self._get(
-                f"{GITHUB_API}/repos/{self.username}/{repo}/pulls",
-                params={"state": "open", "per_page": 1},
-            )
-            pr_count = len(prs) if prs and isinstance(prs, list) else 0
             return max(0, total - pr_count)
         return 0
 
@@ -827,12 +838,8 @@ class GitHubMonitor:
             if fork_delta:
                 print(f" [🍴+{fork_delta}]", end="")
 
-            # Открытые issues
-            info["open_issues"] = self.github.get_open_issues_count(name)
-            time.sleep(API_DELAY)
-
-            # Коммиты
-            all_commits = self.github.get_recent_commits(name, count=MAX_COMMITS)
+            # Коммиты: 1 запрос для списка SHA
+            all_commits = self.github.list_commits(name, count=MAX_COMMITS)
             time.sleep(API_DELAY)
 
             # Фильтруем только новые коммиты, которых нет в памяти
@@ -844,12 +851,24 @@ class GitHubMonitor:
             else:
                 new_commits = [c for c in all_commits if c.get("sha") not in known_shas]
 
+            # Загружаем файлы ТОЛЬКО для новых коммитов (раньше делалось для всех)
+            for commit in new_commits:
+                commit["files"] = self.github.get_commit_files(name, commit["full_sha"])
+                time.sleep(API_DELAY)
+
             info["recent_commits"] = new_commits
 
             # PRs
             prs = self.github.get_open_prs(name, count=MAX_PRS)
             info["open_prs"] = prs
             time.sleep(API_DELAY)
+
+            # Issues: используем данные из списка репо — без лишнего API-запроса
+            info["open_issues"] = self.github.get_open_issues_count(
+                name,
+                open_issues_raw=repo.get("open_issues_count", 0),
+                pr_count=len(prs),
+            )
 
             # Релизы — только если тег изменился
             known_tag = old_state.get("latest_release_tag")
