@@ -390,6 +390,32 @@ class GitHubClient:
             return fmt_date(updated_at) if updated_at else None
         return None
 
+    def get_open_issues_count(self, repo: str) -> int:
+        """Количество открытых issues (без PR) репозитория."""
+        data = self._get(
+            f"{GITHUB_API}/repos/{self.username}/{repo}",
+        )
+        if data and isinstance(data, dict):
+            # open_issues_count включает PR, поэтому вычитаем PR
+            total = data.get("open_issues_count", 0)
+            prs = self._get(
+                f"{GITHUB_API}/repos/{self.username}/{repo}/pulls",
+                params={"state": "open", "per_page": 1},
+            )
+            pr_count = len(prs) if prs and isinstance(prs, list) else 0
+            return max(0, total - pr_count)
+        return 0
+
+    def get_new_releases(self, repo: str, known_tag: Optional[str]) -> List[Dict]:
+        """Возвращает релиз если тег изменился с момента последней проверки."""
+        releases = self.get_releases(repo)
+        if not releases:
+            return []
+        current_tag = releases[0].get("tag", "")
+        if known_tag and current_tag == known_tag:
+            return []
+        return releases
+
 
 # ──────────────────────────────────────────────────────────────
 # TELEGRAM CLIENT
@@ -560,9 +586,22 @@ class MessageBuilder:
             name = escape_html(repo["name"])
             lang = escape_html(repo.get("language") or "Unknown")
             stars = repo.get("stars", 0)
+            forks = repo.get("forks", 0)
+            star_delta = repo.get("star_delta", 0)
+            fork_delta = repo.get("fork_delta", 0)
+            issues = repo.get("open_issues", 0)
             repo_url = f"https://github.com/{username}/{repo['name']}"
 
-            lines.append(f"📁 <b>{name}</b>  <i>{lang}</i>  ⭐{stars}")
+            star_str = f"⭐{stars}"
+            if star_delta > 0:
+                star_str += f" <b>(+{star_delta})</b>"
+            fork_str = f"🍴{forks}" if forks else ""
+            if fork_delta > 0:
+                fork_str += f" <b>(+{fork_delta})</b>"
+            issue_str = f"🐛{issues}" if issues else ""
+
+            meta_parts = [s for s in [star_str, fork_str, issue_str] if s]
+            lines.append(f"📁 <b>{name}</b>  <i>{lang}</i>  {' · '.join(meta_parts)}")
             buttons.append([{"text": f"🔗 {repo['name']}", "url": repo_url}])
 
             # Коммиты
@@ -671,15 +710,27 @@ class GitHubMonitor:
         if not telegram_token: missing.append("TELEGRAM_BOT_TOKEN")
         if not self.chat_id:   missing.append("TELEGRAM_CHAT_ID")
 
-        if missing:
+        self.dry_run = "--dry-run" in sys.argv or os.getenv("DRY_RUN", "").lower() in ("1", "true")
+
+        if self.dry_run:
+            print("🔍 DRY-RUN режим: Telegram уведомления отправляться не будут.")
+            # В dry-run режиме токен Telegram не обязателен
+            if not github_token:
+                missing.append("G_TOKEN")
+        else:
+            if missing:
+                print(f"❌ Отсутствуют переменные окружения: {', '.join(missing)}")
+                print("   Настройте их: Settings → Secrets and variables → Actions")
+                sys.exit(1)
+
+        if missing and not self.dry_run:
             print(f"❌ Отсутствуют переменные окружения: {', '.join(missing)}")
-            print("   Настройте их: Settings → Secrets and variables → Actions")
             sys.exit(1)
 
         self.github   = GitHubClient(github_token, self.username)
         self.telegram = TelegramClient(
-            telegram_token,
-            self.chat_id,
+            telegram_token or "dry_run_placeholder",
+            self.chat_id or "0",
             topic_id=os.getenv("TELEGRAM_TOPIC_ID", "").strip() or None
         )
 
@@ -759,22 +810,40 @@ class GitHubMonitor:
                 "open_prs":       [],
                 "releases":       [],
                 "workflow_runs":  [],
+                "open_issues":    0,
+                "star_delta":     0,
+                "fork_delta":     0,
             }
 
-             # Коммиты
+            # Дельта по звёздам и форкам
+            old_stars = old_state.get("stars", info["stars"])
+            old_forks = old_state.get("forks", info["forks"])
+            star_delta = max(0, info["stars"] - old_stars)
+            fork_delta = max(0, info["forks"] - old_forks)
+            info["star_delta"] = star_delta
+            info["fork_delta"] = fork_delta
+            if star_delta:
+                print(f" [⭐+{star_delta}]", end="")
+            if fork_delta:
+                print(f" [🍴+{fork_delta}]", end="")
+
+            # Открытые issues
+            info["open_issues"] = self.github.get_open_issues_count(name)
+            time.sleep(API_DELAY)
+
+            # Коммиты
             all_commits = self.github.get_recent_commits(name, count=MAX_COMMITS)
             time.sleep(API_DELAY)
 
             # Фильтруем только новые коммиты, которых нет в памяти
-            # Мы храним список всех известных SHA, чтобы не дублировать их
             known_shas = set(old_state.get("known_shas", []))
-            
-            # Если это самый первый запуск (память пуста), берем только последний коммит
+
+            # Если первый запуск — берём только последний коммит
             if not known_shas:
                 new_commits = all_commits[:1]
             else:
                 new_commits = [c for c in all_commits if c.get("sha") not in known_shas]
-            
+
             info["recent_commits"] = new_commits
 
             # PRs
@@ -782,8 +851,9 @@ class GitHubMonitor:
             info["open_prs"] = prs
             time.sleep(API_DELAY)
 
-            # Релизы
-            releases = self.github.get_releases(name, count=MAX_RELEASES)
+            # Релизы — только если тег изменился
+            known_tag = old_state.get("latest_release_tag")
+            releases = self.github.get_new_releases(name, known_tag)
             info["releases"] = releases
             time.sleep(API_DELAY)
 
@@ -792,26 +862,32 @@ class GitHubMonitor:
             info["workflow_runs"] = workflows
             time.sleep(API_DELAY)
 
-            # Проверяем реальные изменения (есть новые коммиты)
-            if new_commits:
+            # Проверяем реальные изменения
+            if new_commits or star_delta or fork_delta:
                 has_real_changes = True
+            if new_commits:
                 print(f" [НОВЫЕ КОММИТЫ: {len(new_commits)}]")
-                
-            # Обновляем список известных SHA в памяти (сохраним всё одним вызовом в конце)
+
+            # Обновляем состояние репозитория
             all_current_shas = [c.get("sha") for c in all_commits if c.get("sha")]
             updated_shas = list(set(known_shas) | set(all_current_shas))
-
-            # Ограничиваем список последних 100 SHA, чтобы файл не раздувался
-            all_states[name] = {
+            new_state = {
                 "known_shas": updated_shas[-100:],
-                "last_check": datetime.now(timezone.utc).isoformat()
+                "last_check": datetime.now(timezone.utc).isoformat(),
+                "stars": info["stars"],
+                "forks": info["forks"],
             }
-            
-            if not new_commits:
+            if releases:
+                new_state["latest_release_tag"] = releases[0].get("tag", known_tag)
+            elif known_tag:
+                new_state["latest_release_tag"] = known_tag
+            all_states[name] = new_state
+
+            if not new_commits and not star_delta and not fork_delta:
                 print(" [без изменений]")
-            
-            # Добавляем в отчет только если есть что показать
-            if new_commits or prs or releases:
+
+            # Добавляем в отчёт если есть что показать
+            if new_commits or prs or releases or star_delta or fork_delta:
                 repos_data.append(info)
 
         # Сохраняем все обновлённые состояния одной записью
@@ -829,11 +905,27 @@ class GitHubMonitor:
             reverse=True,
         )
 
-        # Формируем и отправляем сообщение
+        # Формируем сообщение
         print()
         print("Формирование сообщения...")
         message, markup = MessageBuilder.build(self.username, repos_data)
         print(f"Длина сообщения: {len(message)} символов")
+
+        if self.dry_run:
+            print()
+            print("─" * 60)
+            print("DRY-RUN: сообщение которое было бы отправлено:")
+            print("─" * 60)
+            # Убираем HTML теги для читабельного вывода в консоль
+            import re as _re
+            plain = _re.sub(r"<[^>]+>", "", message)
+            print(plain)
+            print("─" * 60)
+            print("DRY-RUN: Telegram не отправлялся.")
+            if latest_update:
+                save_last_check_date(latest_update)
+            return
+
         print()
         print("Отправка в Telegram...")
         success = self.telegram.send(message, reply_markup=markup)
@@ -841,12 +933,10 @@ class GitHubMonitor:
         print()
         if success:
             print("Мониторинг успешно завершен")
-            # Сохраняем дату последней успешной проверки
             if latest_update:
                 save_last_check_date(latest_update)
         else:
             print("Мониторинг завершен с ошибками отправки")
-            # Пробуем отправить аварийное сообщение
             self.telegram.send(
                 "<b>GitHub Monitor</b>\n"
                 "Отчет сформирован, но некоторые части не отправлены.\n"
