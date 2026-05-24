@@ -12,6 +12,7 @@ import requests
 import hashlib
 import json
 import re
+import concurrent.futures
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from urllib.parse import quote
@@ -93,7 +94,7 @@ def truncate(text: str, max_len: int = 60) -> str:
 
 
 def load_last_check_date() -> Optional[str]:
-    """Загружает дату последней проверки из JSON файла."""
+    """Загружает дату последней проверки из JSON файла (raw ISO string)."""
     try:
         if os.path.exists('last_check.json'):
             with open('last_check.json', 'r', encoding='utf-8') as f:
@@ -117,17 +118,12 @@ def _atomic_json_write(path: str, data: Any) -> None:
 
 
 def save_last_check_date(date_str: str) -> None:
-    """Сохраняет дату последней проверки в JSON файл."""
+    """Сохраняет дату последней проверки в JSON файл (raw ISO string)."""
     try:
         _atomic_json_write('last_check.json', {'last_check_date': date_str})
         print(f'Дата последней проверки обновлена: {date_str}')
     except Exception as e:
         print(f'Ошибка сохранения даты последней проверки: {e}')
-
-
-def calculate_content_checksum(content: str) -> str:
-    """Вычисляет чек-сумму содержимого."""
-    return hashlib.md5(content.encode('utf-8')).hexdigest()
 
 
 def load_all_repository_states(username: str) -> Dict[str, Any]:
@@ -156,17 +152,17 @@ def build_file_tree(files: List[Dict]) -> str:
     """Строит красивое дерево файлов."""
     if not files:
         return ""
-    
+
     tree_lines = []
-    
+
     # Группируем файлы по папкам
     folders = {}
     root_files = []
-    
+
     for f in files:
         path = f["filename"]
         parts = path.split("/")
-        
+
         if len(parts) == 1:
             # Файл в корне
             root_files.append(f)
@@ -176,38 +172,40 @@ def build_file_tree(files: List[Dict]) -> str:
             if folder not in folders:
                 folders[folder] = []
             folders[folder].append(f)
-    
+
     if root_files:
         for f in root_files:
             changes = f.get("changes", 0)
             additions = f.get("additions", 0)
             deletions = f.get("deletions", 0)
             filename = f["filename"]
-            
+
             if changes > 0:
                 tree_lines.append(f"├── {filename} (+{additions}/-{deletions})")
             else:
                 tree_lines.append(f"├── {filename}")
-    
+
     # Добавляем папки
     for folder_name, folder_files in sorted(folders.items()):
         tree_lines.append(f"├── {folder_name}/")
-        
+
         for i, f in enumerate(folder_files):
             changes = f.get("changes", 0)
             additions = f.get("additions", 0)
             deletions = f.get("deletions", 0)
             filename = f["filename"]
-            
-            rel_path = filename.split("/")[-1]
+
+            # Fix #9: show nested path relative to folder (e.g. utils/helper.py under src/)
+            parts = filename.split("/")
+            rel_path = "/".join(parts[1:])
             is_last = (i == len(folder_files) - 1)
             prefix = "│   └── " if is_last else "│   ├── "
-            
+
             if changes > 0:
                 tree_lines.append(f"{prefix}{rel_path} (+{additions}/-{deletions})")
             else:
                 tree_lines.append(f"{prefix}{rel_path}")
-    
+
     return "\n".join(tree_lines)
 
 
@@ -282,7 +280,10 @@ class GitHubClient:
         return all_repos
 
     def list_commits(self, repo: str, count: int = 5) -> List[Dict]:
-        """Список последних N коммитов без загрузки изменённых файлов (1 API-запрос)."""
+        """Список последних N коммитов без загрузки изменённых файлов (1 API-запрос).
+
+        Fix #1: stores full SHA in "sha" field; display truncation happens at render time.
+        """
         data = self._get(
             f"{GITHUB_API}/repos/{self.username}/{repo}/commits",
             params={"per_page": count},
@@ -294,8 +295,7 @@ class GitHubClient:
         for c in data[:count]:
             try:
                 result.append({
-                    "sha":      c["sha"][:7],
-                    "full_sha": c["sha"],
+                    "sha":      c["sha"],          # full SHA — dedup uses this
                     "message":  truncate(c["commit"]["message"].split("\n")[0], 60),
                     "author":   truncate(c["commit"]["author"]["name"], 25),
                     "date":     c["commit"]["author"]["date"],
@@ -381,6 +381,7 @@ class GitHubClient:
         for run in data["workflow_runs"][:count]:
             try:
                 result.append({
+                    "id":           run["id"],
                     "name":         truncate(run["name"], 40),
                     "status":       run["status"],
                     "conclusion":   run.get("conclusion", "running"),
@@ -392,14 +393,17 @@ class GitHubClient:
         return result
 
     def get_latest_repo_update(self) -> Optional[str]:
-        """Быстрая проверка: дата обновления самого свежего репо (для раннего выхода)."""
+        """Быстрая проверка: raw ISO string обновления самого свежего репо (для раннего выхода).
+
+        Fix #2: returns raw ISO string instead of fmt_date() result so comparison is reliable.
+        """
         data = self._get(
             f"{GITHUB_API}/users/{self.username}/repos",
             params={"type": "owner", "sort": "updated", "per_page": 1},
         )
         if data and isinstance(data, list) and data:
             updated_at = data[0].get("updated_at", "")
-            return fmt_date(updated_at) if updated_at else None
+            return updated_at if updated_at else None
         return None
 
     def get_open_issues_count(self, repo: str, open_issues_raw: int = -1, pr_count: int = 0) -> int:
@@ -431,7 +435,7 @@ class GitHubClient:
 # TELEGRAM CLIENT
 # ──────────────────────────────────────────────────────────────
 class TelegramClient:
-    def __init__(self, token: str, chat_id: str, topic_id: Optional[str] = None):
+    def __init__(self, token: str, chat_id: str, topic_id: Optional[int] = None):
         self.token   = token
         self.chat_id = chat_id
         self.topic_id = topic_id  # Поддержка тем/топиков в Telegram
@@ -550,6 +554,8 @@ class TelegramClient:
         """
         Разбивает текст на части ≤ limit символов.
         Старается резать по строкам а не по середине слова.
+
+        Fix #4: adds guard against empty string after lstrip to avoid appending "".
         """
         if len(text) <= limit:
             return [text]
@@ -565,6 +571,8 @@ class TelegramClient:
                 cut = limit
             parts.append(text[:cut])
             text = text[cut:].lstrip("\n")
+            if not text:
+                break
 
         return parts
 
@@ -608,6 +616,11 @@ class MessageBuilder:
         total_commits = sum(len(r.get("recent_commits", [])) for r in changed_repos)
         lines.append(f"📦 Репозиториев с изменениями: <b>{len(changed_repos)}</b>  |  📝 Новых коммитов: <b>{total_commits}</b>\n")
 
+        # Fix #11: PR/issue stats summary line
+        total_prs = sum(len(r.get("open_prs", [])) for r in repos_data)
+        total_issues = sum(r.get("open_issues", 0) for r in repos_data)
+        lines.append(f"🔍 Всего PR: <b>{total_prs}</b>  |  🐛 Issues: <b>{total_issues}</b>\n")
+
         for repo in changed_repos:
             name = escape_html(repo["name"])
             lang = escape_html(repo.get("language") or "Unknown")
@@ -635,6 +648,7 @@ class MessageBuilder:
             if commits:
                 lines.append("<b>Изменения:</b>")
                 for c in commits:
+                    # Fix #1: full SHA stored; truncate to 7 chars only at display time
                     sha = escape_html(c["sha"][:7])
                     msg = escape_html(c["message"])
                     auth = escape_html(c["author"])
@@ -749,16 +763,147 @@ class GitHubMonitor:
                 print("   Настройте их: Settings → Secrets and variables → Actions")
                 sys.exit(1)
 
-        if missing and not self.dry_run:
-            print(f"❌ Отсутствуют переменные окружения: {', '.join(missing)}")
-            sys.exit(1)
+        # Fix #6: removed duplicate dead code block that checked missing after sys.exit(1)
 
         self.github   = GitHubClient(github_token, self.username)
+        # Fix #5: TELEGRAM_TOPIC_ID properly parsed as integer
         self.telegram = TelegramClient(
             telegram_token or "dry_run_placeholder",
             self.chat_id or "0",
-            topic_id=os.getenv("TELEGRAM_TOPIC_ID", "").strip() or None
+            topic_id=int(os.getenv("TELEGRAM_TOPIC_ID", "0")) or None
         )
+
+    def _collect_repo_data(self, repo: Dict, old_state: Dict) -> Dict[str, Any]:
+        """Performs ALL per-repo API calls and returns collected data + new state.
+
+        Fix #10: designed to be called concurrently via ThreadPoolExecutor.
+        """
+        name = repo["name"]
+
+        # Базовые данные из списка
+        info: Dict[str, Any] = {
+            "name":        name,
+            "description": repo.get("description") or "",
+            "updated_at":  repo.get("updated_at", ""),
+            "pushed_at":   repo.get("pushed_at", ""),
+            "stars":       repo.get("stargazers_count", 0),
+            "forks":       repo.get("forks_count", 0),
+            "language":    repo.get("language") or "Unknown",
+            "private":     repo.get("private", False),
+            "recent_commits": [],
+            "open_prs":       [],
+            "releases":       [],
+            "workflow_runs":  [],
+            "open_issues":    0,
+            "star_delta":     0,
+            "fork_delta":     0,
+        }
+
+        # Дельта по звёздам и форкам
+        old_stars = old_state.get("stars", info["stars"])
+        old_forks = old_state.get("forks", info["forks"])
+        star_delta = max(0, info["stars"] - old_stars)
+        fork_delta = max(0, info["forks"] - old_forks)
+        info["star_delta"] = star_delta
+        info["fork_delta"] = fork_delta
+        if star_delta:
+            print(f"[{name}] ⭐+{star_delta}")
+        if fork_delta:
+            print(f"[{name}] 🍴+{fork_delta}")
+
+        # Коммиты: 1 запрос для списка SHA
+        all_commits = self.github.list_commits(name, count=MAX_COMMITS)
+        time.sleep(API_DELAY)
+
+        # Fix #1: SHA deduplication uses full SHA
+        known_shas = set(old_state.get("known_shas", []))
+
+        # Если первый запуск — берём только последний коммит
+        if not known_shas:
+            new_commits = all_commits[:1]
+        else:
+            new_commits = [c for c in all_commits if c.get("sha") not in known_shas]
+
+        # Загружаем файлы ТОЛЬКО для новых коммитов
+        for commit in new_commits:
+            commit["files"] = self.github.get_commit_files(name, commit["sha"])
+            time.sleep(API_DELAY)
+
+        info["recent_commits"] = new_commits
+
+        # PRs with deduplication — Fix #3
+        prs_raw = self.github.get_open_prs(name, count=MAX_PRS)
+        known_pr_numbers = set(old_state.get("known_pr_numbers", []))
+        if not known_pr_numbers:
+            new_prs = prs_raw[:1]
+        else:
+            new_prs = [p for p in prs_raw if p["number"] not in known_pr_numbers]
+        info["open_prs"] = new_prs
+        time.sleep(API_DELAY)
+
+        # Issues: используем данные из списка репо — без лишнего API-запроса
+        info["open_issues"] = self.github.get_open_issues_count(
+            name,
+            open_issues_raw=repo.get("open_issues_count", 0),
+            pr_count=len(prs_raw),
+        )
+
+        # Релизы — только если тег изменился
+        known_tag = old_state.get("latest_release_tag")
+        releases = self.github.get_new_releases(name, known_tag)
+        info["releases"] = releases
+        time.sleep(API_DELAY)
+
+        # Workflow runs with deduplication — Fix #3
+        workflows_raw = self.github.get_workflow_runs(name, count=MAX_WORKFLOWS)
+        known_run_ids = set(old_state.get("known_run_ids", []))
+        if not known_run_ids:
+            new_workflows = workflows_raw[:1]
+        else:
+            new_workflows = [w for w in workflows_raw if w.get("id") not in known_run_ids]
+        info["workflow_runs"] = new_workflows
+        time.sleep(API_DELAY)
+
+        has_real_changes = bool(new_commits or star_delta or fork_delta)
+        if new_commits:
+            print(f"[{name}] НОВЫЕ КОММИТЫ: {len(new_commits)}")
+        elif not star_delta and not fork_delta:
+            print(f"[{name}] без изменений")
+
+        # Обновляем состояние репозитория
+        # Fix #1: all_current_shas uses full SHA (c.get("sha") is now full)
+        all_current_shas = [c.get("sha") for c in all_commits if c.get("sha")]
+        updated_shas = list(set(known_shas) | set(all_current_shas))
+
+        # Fix #3: update known PR numbers and run IDs
+        all_current_pr_numbers = [p["number"] for p in prs_raw]
+        updated_pr_numbers = list(set(known_pr_numbers) | set(all_current_pr_numbers))
+
+        all_current_run_ids = [w.get("id") for w in workflows_raw if w.get("id")]
+        updated_run_ids = list(set(known_run_ids) | set(all_current_run_ids))
+
+        new_state = {
+            "known_shas":       updated_shas[-100:],
+            "known_pr_numbers": updated_pr_numbers[-200:],
+            "known_run_ids":    updated_run_ids[-200:],
+            "last_check":       datetime.now(timezone.utc).isoformat(),
+            "stars":            info["stars"],
+            "forks":            info["forks"],
+        }
+        if releases:
+            new_state["latest_release_tag"] = releases[0].get("tag", known_tag)
+        elif known_tag:
+            new_state["latest_release_tag"] = known_tag
+
+        # Добавляем в отчёт если есть что показать
+        include_in_report = bool(new_commits or new_prs or releases or star_delta or fork_delta)
+
+        return {
+            "info":             info,
+            "new_state":        new_state,
+            "has_real_changes": has_real_changes,
+            "include_in_report": include_in_report,
+        }
 
     def run(self):
         print(f"Запуск GitHub монитора для: {self.username}")
@@ -767,8 +912,9 @@ class GitHubMonitor:
             print(f"Пропускаем репозитории: {', '.join(sorted(self.skip_repos))}")
         print()
 
-        # Быстрая проверка — были ли вообще обновления (использует авторизованную сессию)
+        # Быстрая проверка — были ли вообще обновления
         print("Проверка новых релизов...")
+        # Fix #2: get_latest_repo_update returns raw ISO string; compare ISO strings directly
         latest_update = self.github.get_latest_repo_update()
         last_check = load_last_check_date()
 
@@ -809,120 +955,44 @@ class GitHubMonitor:
         # Собираем детальную информацию
         print()
         print("Сбор информации о репозиториях...")
-        repos_data = []
-        has_real_changes = False
 
         # Загружаем все состояния одним чтением файла
         all_states = load_all_repository_states(self.username)
 
-        for i, repo in enumerate(repositories, 1):
+        repos_data = []
+        has_real_changes = False
+
+        # Fix #10: concurrent per-repo API calls using ThreadPoolExecutor
+        def _worker(repo: Dict) -> tuple[str, Dict]:
+            old_state = all_states.get(repo["name"], {})
+            result = self._collect_repo_data(repo, old_state)
+            return repo["name"], result
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+            futures = {executor.submit(_worker, repo): repo["name"] for repo in repositories}
+            results: Dict[str, Dict] = {}
+            for future in concurrent.futures.as_completed(futures):
+                repo_name = futures[future]
+                try:
+                    name, result = future.result()
+                    results[name] = result
+                except Exception as exc:
+                    print(f"[{repo_name}] Ошибка сбора данных: {exc}")
+
+        # Process results sequentially (state saving must be sequential)
+        for repo in repositories:
             name = repo["name"]
-            print(f"[{i:2d}/{len(repositories)}] {name}", end="", flush=True)
+            if name not in results:
+                continue
+            result = results[name]
 
-            # Берём состояние из уже загруженного словаря
-            old_state = all_states.get(name, {})
-            
-            # Базовые данные из списка
-            info: Dict[str, Any] = {
-                "name":        name,
-                "description": repo.get("description") or "",
-                "updated_at":  repo.get("updated_at", ""),
-                "pushed_at":   repo.get("pushed_at", ""),
-                "stars":       repo.get("stargazers_count", 0),
-                "forks":       repo.get("forks_count", 0),
-                "language":    repo.get("language") or "Unknown",
-                "private":     repo.get("private", False),
-                "recent_commits": [],
-                "open_prs":       [],
-                "releases":       [],
-                "workflow_runs":  [],
-                "open_issues":    0,
-                "star_delta":     0,
-                "fork_delta":     0,
-            }
+            all_states[name] = result["new_state"]
 
-            # Дельта по звёздам и форкам
-            old_stars = old_state.get("stars", info["stars"])
-            old_forks = old_state.get("forks", info["forks"])
-            star_delta = max(0, info["stars"] - old_stars)
-            fork_delta = max(0, info["forks"] - old_forks)
-            info["star_delta"] = star_delta
-            info["fork_delta"] = fork_delta
-            if star_delta:
-                print(f" [⭐+{star_delta}]", end="")
-            if fork_delta:
-                print(f" [🍴+{fork_delta}]", end="")
-
-            # Коммиты: 1 запрос для списка SHA
-            all_commits = self.github.list_commits(name, count=MAX_COMMITS)
-            time.sleep(API_DELAY)
-
-            # Фильтруем только новые коммиты, которых нет в памяти
-            known_shas = set(old_state.get("known_shas", []))
-
-            # Если первый запуск — берём только последний коммит
-            if not known_shas:
-                new_commits = all_commits[:1]
-            else:
-                new_commits = [c for c in all_commits if c.get("sha") not in known_shas]
-
-            # Загружаем файлы ТОЛЬКО для новых коммитов (раньше делалось для всех)
-            for commit in new_commits:
-                commit["files"] = self.github.get_commit_files(name, commit["full_sha"])
-                time.sleep(API_DELAY)
-
-            info["recent_commits"] = new_commits
-
-            # PRs
-            prs = self.github.get_open_prs(name, count=MAX_PRS)
-            info["open_prs"] = prs
-            time.sleep(API_DELAY)
-
-            # Issues: используем данные из списка репо — без лишнего API-запроса
-            info["open_issues"] = self.github.get_open_issues_count(
-                name,
-                open_issues_raw=repo.get("open_issues_count", 0),
-                pr_count=len(prs),
-            )
-
-            # Релизы — только если тег изменился
-            known_tag = old_state.get("latest_release_tag")
-            releases = self.github.get_new_releases(name, known_tag)
-            info["releases"] = releases
-            time.sleep(API_DELAY)
-
-            # Workflow runs
-            workflows = self.github.get_workflow_runs(name, count=MAX_WORKFLOWS)
-            info["workflow_runs"] = workflows
-            time.sleep(API_DELAY)
-
-            # Проверяем реальные изменения
-            if new_commits or star_delta or fork_delta:
+            if result["has_real_changes"]:
                 has_real_changes = True
-            if new_commits:
-                print(f" [НОВЫЕ КОММИТЫ: {len(new_commits)}]")
 
-            # Обновляем состояние репозитория
-            all_current_shas = [c.get("sha") for c in all_commits if c.get("sha")]
-            updated_shas = list(set(known_shas) | set(all_current_shas))
-            new_state = {
-                "known_shas": updated_shas[-100:],
-                "last_check": datetime.now(timezone.utc).isoformat(),
-                "stars": info["stars"],
-                "forks": info["forks"],
-            }
-            if releases:
-                new_state["latest_release_tag"] = releases[0].get("tag", known_tag)
-            elif known_tag:
-                new_state["latest_release_tag"] = known_tag
-            all_states[name] = new_state
-
-            if not new_commits and not star_delta and not fork_delta:
-                print(" [без изменений]")
-
-            # Добавляем в отчёт если есть что показать
-            if new_commits or prs or releases or star_delta or fork_delta:
-                repos_data.append(info)
+            if result["include_in_report"]:
+                repos_data.append(result["info"])
 
         # Сохраняем все обновлённые состояния одной записью
         save_all_repository_states(self.username, all_states)
@@ -950,9 +1020,8 @@ class GitHubMonitor:
             print("─" * 60)
             print("DRY-RUN: сообщение которое было бы отправлено:")
             print("─" * 60)
-            # Убираем HTML теги для читабельного вывода в консоль
-            import re as _re
-            plain = _re.sub(r"<[^>]+>", "", message)
+            # Fix #7: use module-level re instead of importing re as _re inside function
+            plain = re.sub(r"<[^>]+>", "", message)
             print(plain)
             print("─" * 60)
             print("DRY-RUN: Telegram не отправлялся.")
