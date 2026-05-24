@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.pyc
+.env
+*.env.*
+!.env.example
+last_check.json
+repo_states_*.json
+*.log
+.venv/
+venv/
+.DS_Store

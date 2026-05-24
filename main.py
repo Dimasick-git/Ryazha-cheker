@@ -25,7 +25,6 @@ GITHUB_API         = "https://api.github.com"
 TELEGRAM_API       = "https://api.telegram.org"
 
 # Сколько репо/коммитов показывать
-MAX_ACTIVE_REPOS   = 10  # Показываем все репозитории
 MAX_COMMITS        = 5
 MAX_PRS            = 3
 MAX_RELEASES       = 1  # Только latest релиз
@@ -499,36 +498,52 @@ class TelegramClient:
             payload["reply_markup"] = reply_markup
         if self.topic_id:
             payload["message_thread_id"] = self.topic_id
-        try:
-            resp = self.session.post(
-                f"{self.base}/sendMessage",
-                json=payload,
-                timeout=30,
-            )
-            data = resp.json()
+        delay = 2
+        for attempt in range(3):
+            try:
+                resp = self.session.post(
+                    f"{self.base}/sendMessage",
+                    json=payload,
+                    timeout=30,
+                )
+                data = resp.json()
 
-            if data.get("ok"):
-                return True
+                if data.get("ok"):
+                    return True
 
-            desc = data.get("description", "неизвестная ошибка")
-            print(f"  ⚠️  Ошибка Telegram: {desc}")
+                desc = data.get("description", "неизвестная ошибка")
+                print(f"  ⚠️  Ошибка Telegram: {desc}")
 
-            # Подсказки
-            if "chat not found" in desc.lower():
-                print("  💡 Исправление: отправьте /start боту сначала, или проверьте CHAT_ID")
-            elif "blocked" in desc.lower():
-                print("  💡 Исправление: пользователь заблокировал бота — разблокируйте в Telegram")
-            elif "parse" in desc.lower():
-                print("  💡 Исправление: ошибка HTML парсинга — будет повторная попытка как простой текст")
+                # Подсказки
+                if "chat not found" in desc.lower():
+                    print("  💡 Проверьте CHAT_ID (отправьте /start боту)")
+                elif "blocked" in desc.lower():
+                    print("  💡 Пользователь заблокировал бота")
+                elif "parse" in desc.lower():
+                    print("  💡 Ошибка HTML парсинга — будет попытка как plain text")
+                elif "too many requests" in desc.lower():
+                    retry_after = data.get("parameters", {}).get("retry_after", delay)
+                    print(f"  ⏳ Flood control — ждём {retry_after}s")
+                    time.sleep(retry_after)
+                    delay = retry_after
+                    continue
 
-            return False
+                return False
 
-        except requests.exceptions.Timeout:
-            print("  ⏱️  Таймаут Telegram")
-            return False
-        except Exception as e:
-            print(f"  ❌ Исключение Telegram: {e}")
-            return False
+            except requests.exceptions.Timeout:
+                print(f"  ⏱️  Таймаут Telegram (попытка {attempt + 1}/3) — повтор через {delay}s")
+                time.sleep(delay)
+                delay *= 2
+            except requests.exceptions.ConnectionError as e:
+                print(f"  🌐 Ошибка соединения (попытка {attempt + 1}/3): {e} — повтор через {delay}s")
+                time.sleep(delay)
+                delay *= 2
+            except Exception as e:
+                print(f"  ❌ Исключение Telegram: {e}")
+                return False
+
+        print("  ❌ Все попытки исчерпаны для _send_part")
+        return False
 
     @staticmethod
     def _split(text: str, limit: int = TELEGRAM_MAX_LENGTH) -> List[str]:
