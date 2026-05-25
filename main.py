@@ -580,6 +580,11 @@ class MessageBuilder:
             lines.append(f"▸ <b>[{name}]</b> <i>{lang}</i>{meta_str}")
             buttons.append([{"text": f"open: {repo['name']}", "url": repo_url}])
 
+            # Milestone уведомление
+            milestones = repo.get("star_milestones", [])
+            for m in milestones:
+                lines.append(f"  🌟 <b>MILESTONE: {m} звёзд!</b>")
+
             # Коммиты -- без подзаголовка
             commits = repo.get("recent_commits", [])[:2]
             for c in commits:
@@ -646,16 +651,19 @@ class MessageBuilder:
 # MONITOR
 # ──────────────────────────────────────────────────────────────
 WORKFLOW_ICONS = {
-    "success":   "[OK]",
-    "failure":   "[FAIL]",
-    "cancelled": "[CANCEL]",
-    "skipped":   "[SKIP]",
-    "in_progress": "[RUN]",
-    "queued":    "[QUEUE]",
-    "waiting":   "[WAIT]",
-    "running":   "[RUN]",
-    None:        "[?]",
+    "success":     "✅",
+    "failure":     "❌",
+    "cancelled":   "🚫",
+    "skipped":     "⏭",
+    "in_progress": "🔄",
+    "queued":      "⏳",
+    "waiting":     "⏳",
+    "running":     "🔄",
+    None:          "❓",
 }
+
+# Star counts that trigger a milestone notification
+STAR_MILESTONES = {5, 10, 25, 50, 100, 250, 500, 1000}
 
 
 def workflow_icon(conclusion: Optional[str], status: str) -> str:
@@ -744,6 +752,12 @@ class GitHubMonitor:
         if fork_delta:
             print(f"[{name}] forks +{fork_delta}")
 
+        # Milestone: check if we crossed any star threshold this run
+        crossed = [m for m in STAR_MILESTONES if old_stars < m <= info["stars"]]
+        info["star_milestones"] = crossed
+        for m in crossed:
+            print(f"[{name}] 🌟 MILESTONE: {m} stars!")
+
         # Коммиты: 1 запрос для списка SHA
         all_commits = self.github.list_commits(name, count=MAX_COMMITS)
         time.sleep(API_DELAY)
@@ -829,7 +843,7 @@ class GitHubMonitor:
             new_state["latest_release_tag"] = known_tag
 
         # Добавляем в отчёт если есть что показать
-        include_in_report = bool(new_commits or new_prs or releases or star_delta or fork_delta)
+        include_in_report = bool(new_commits or new_prs or releases or star_delta or fork_delta or info.get("star_milestones"))
 
         return {
             "info":             info,
