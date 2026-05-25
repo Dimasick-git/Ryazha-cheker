@@ -55,8 +55,9 @@ prs_total=4 | issues=7
 
 [repo-name] python  stars=42 forks=3 issues=1
     by author @ 2026-05-25 14:12
-    - path/to/file.py
-    - another/file.cpp
+    - Source/ryazha-clk/sysmodule/src/main.cpp (+12/-3)
+    - common/include/rclk/ipc.h (+1/-1)
+    - .github/workflows/build.yml (+8/-0)
 
 RELEASE: v2.4.0 — short title
 PR: #123 title | #145 another

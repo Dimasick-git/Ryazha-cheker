@@ -148,70 +148,6 @@ def save_all_repository_states(username: str, states: Dict[str, Any]) -> None:
         print(f'Ошибка сохранения состояний репозиториев: {e}')
 
 
-def build_file_tree(files: List[Dict]) -> str:
-    """Строит красивое дерево файлов."""
-    if not files:
-        return ""
-
-    tree_lines = []
-
-    # Группируем файлы по папкам
-    folders = {}
-    root_files = []
-
-    for f in files:
-        path = f["filename"]
-        parts = path.split("/")
-
-        if len(parts) == 1:
-            # Файл в корне
-            root_files.append(f)
-        else:
-            # Файл в подпапке
-            folder = parts[0]
-            if folder not in folders:
-                folders[folder] = []
-            folders[folder].append(f)
-
-    if root_files:
-        for f in root_files:
-            changes = f.get("changes", 0)
-            additions = f.get("additions", 0)
-            deletions = f.get("deletions", 0)
-            filename = f["filename"]
-
-            if changes > 0:
-                tree_lines.append(f"├── {filename} (+{additions}/-{deletions})")
-            else:
-                tree_lines.append(f"├── {filename}")
-
-    # Добавляем папки
-    for folder_name, folder_files in sorted(folders.items()):
-        tree_lines.append(f"├── {folder_name}/")
-
-        for i, f in enumerate(folder_files):
-            changes = f.get("changes", 0)
-            additions = f.get("additions", 0)
-            deletions = f.get("deletions", 0)
-            filename = f["filename"]
-
-            # Fix #9: show nested path relative to folder (e.g. utils/helper.py under src/)
-            parts = filename.split("/")
-            rel_path = "/".join(parts[1:])
-            is_last = (i == len(folder_files) - 1)
-            prefix = "│   └── " if is_last else "│   ├── "
-
-            if changes > 0:
-                tree_lines.append(f"{prefix}{rel_path} (+{additions}/-{deletions})")
-            else:
-                tree_lines.append(f"{prefix}{rel_path}")
-
-    return "\n".join(tree_lines)
-
-
-# ──────────────────────────────────────────────────────────────
-# GITHUB CLIENT
-# ──────────────────────────────────────────────────────────────
 class GitHubClient:
     def __init__(self, token: str, username: str):
         self.username = username
@@ -660,15 +596,20 @@ class MessageBuilder:
 
                     files = c.get("files", [])
                     if files:
-                        tree = build_file_tree(files[:5])
-                        if tree.strip():
-                            lines.append(html_code_block(tree))
-
+                        # Full path для каждого файла + change stats.
+                        # Раньше был ASCII-tree с относительными путями + 3 файла -
+                        # инфы мало. Теперь до 8 файлов, всегда полный путь от корня
+                        # репо, ссылка на конкретную версию в этом коммите.
                         file_links = []
-                        for f in files[:3]:
+                        for f in files[:8]:
                             fname = escape_html(f["filename"])
                             furl = escape_html(build_github_file_url(c["html_url"], f["filename"], f))
-                            file_links.append(f"    - <a href=\"{furl}\">{fname}</a>")
+                            adds = f.get("additions", 0)
+                            dels = f.get("deletions", 0)
+                            stats = f" <i>(+{adds}/-{dels})</i>" if (adds or dels) else ""
+                            file_links.append(f"    - <a href=\"{furl}\">{fname}</a>{stats}")
+                        if len(files) > 8:
+                            file_links.append(f"    - <i>... and {len(files) - 8} more</i>")
                         if file_links:
                             lines.extend(file_links)
 
