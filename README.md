@@ -47,23 +47,23 @@ python -m pytest test_telegram.py   # требует живые TELEGRAM_* env
 Telegram сообщение собирается из секций:
 
 ```
-GITHUB MONITOR [username]
-ts: 2026-05-25 14:30
+GITHUB MONITOR [username] · 2026-05-25 14:30
 
-repos_changed=3 | commits_new=12
-prs_total=4 | issues=7
+repos=3 commits=12 prs=4 issues=7
 
-[repo-name] python  stars=42 forks=3 issues=1
-    by author @ 2026-05-25 14:12
-    - Source/ryazha-clk/sysmodule/src/main.cpp (+12/-3)
-    - common/include/rclk/ipc.h (+1/-1)
-    - .github/workflows/build.yml (+8/-0)
-
-RELEASE: v2.4.0 — short title
-PR: #123 title | #145 another
+▸ [repo-name] python · stars=42 · forks=3 · issues=1
+  abcd123 fix bug in IPC dispatcher
+  by author @ 2026-05-25 14:12
+  ├─ Source/ryazha-clk/sysmodule/src/main.cpp (+12/-3)
+  ├─ common/include/rclk/ipc.h (+1/-1)
+  └─ .github/workflows/build.yml (+8/-0)
+  CI: [OK] Build
+  RELEASE: v2.4.0 — short title
+  PR: #123 title
+────────────────────
 ```
 
-Workflow runs показываются с тегами `[OK]`, `[FAIL]`, `[RUN]`, `[QUEUE]`, `[CANCEL]`, `[SKIP]`.
+Workflow run теги: `[OK]` / `[FAIL]` / `[RUN]` / `[QUEUE]` / `[WAIT]` / `[CANCEL]` / `[SKIP]` / `[?]`.
 
 ## Лицензия
 

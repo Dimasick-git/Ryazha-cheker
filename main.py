@@ -538,9 +538,7 @@ class MessageBuilder:
 
         now = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
         lines += [
-            f"<b>GITHUB MONITOR</b> [<code>{escape_html(username)}</code>]",
-            f"<i>ts: {now}</i>",
-            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"<b>GITHUB MONITOR</b> [<code>{escape_html(username)}</code>] · <i>{now}</i>",
             "",
         ]
 
@@ -550,12 +548,14 @@ class MessageBuilder:
             return "<i>status: idle. no changes detected.</i>", None
 
         total_commits = sum(len(r.get("recent_commits", [])) for r in changed_repos)
-        lines.append(f"repos_changed=<b>{len(changed_repos)}</b> | commits_new=<b>{total_commits}</b>\n")
-
-        # Fix #11: PR/issue stats summary line
         total_prs = sum(len(r.get("open_prs", [])) for r in repos_data)
         total_issues = sum(r.get("open_issues", 0) for r in repos_data)
-        lines.append(f" Всего PR: <b>{total_prs}</b>  |   Issues: <b>{total_issues}</b>\n")
+        lines.append(
+            f"<i>repos=<b>{len(changed_repos)}</b> "
+            f"commits=<b>{total_commits}</b> "
+            f"prs=<b>{total_prs}</b> "
+            f"issues=<b>{total_issues}</b></i>\n"
+        )
 
         for repo in changed_repos:
             name = escape_html(repo["name"])
@@ -576,44 +576,39 @@ class MessageBuilder:
             issue_str = f"issues={issues}" if issues else ""
 
             meta_parts = [s for s in [star_str, fork_str, issue_str] if s]
-            lines.append(f"<b>[{name}]</b> <i>{lang}</i>  {' · '.join(meta_parts)}")
+            meta_str = " · " + " · ".join(meta_parts) if meta_parts else ""
+            lines.append(f"▸ <b>[{name}]</b> <i>{lang}</i>{meta_str}")
             buttons.append([{"text": f"open: {repo['name']}", "url": repo_url}])
 
-            # Коммиты
+            # Коммиты -- без подзаголовка
             commits = repo.get("recent_commits", [])[:2]
-            if commits:
-                lines.append("<b>Изменения:</b>")
-                for c in commits:
-                    # Fix #1: full SHA stored; truncate to 7 chars only at display time
-                    sha = escape_html(c["sha"][:7])
-                    msg = escape_html(c["message"])
-                    auth = escape_html(c["author"])
-                    date = escape_html(fmt_date(c["date"]))
-                    url = escape_html(c["html_url"])
+            for c in commits:
+                sha = escape_html(c["sha"][:7])
+                msg = escape_html(c["message"])
+                auth = escape_html(c["author"])
+                date = escape_html(fmt_date(c["date"]))
+                url = escape_html(c["html_url"])
 
-                    lines.append(f"  • <a href=\"{url}\"><code>{sha}</code></a> {msg}")
-                    lines.append(f"    by {auth} @ {date}")
+                lines.append(f"  <a href=\"{url}\"><code>{sha}</code></a> {msg}")
+                lines.append(f"  <i>by {auth} @ {date}</i>")
 
-                    files = c.get("files", [])
-                    if files:
-                        # Full path для каждого файла + change stats.
-                        # Раньше был ASCII-tree с относительными путями + 3 файла -
-                        # инфы мало. Теперь до 8 файлов, всегда полный путь от корня
-                        # репо, ссылка на конкретную версию в этом коммите.
-                        file_links = []
-                        for f in files[:8]:
-                            fname = escape_html(f["filename"])
-                            furl = escape_html(build_github_file_url(c["html_url"], f["filename"], f))
-                            adds = f.get("additions", 0)
-                            dels = f.get("deletions", 0)
-                            stats = f" <i>(+{adds}/-{dels})</i>" if (adds or dels) else ""
-                            file_links.append(f"    - <a href=\"{furl}\">{fname}</a>{stats}")
-                        if len(files) > 8:
-                            file_links.append(f"    - <i>... and {len(files) - 8} more</i>")
-                        if file_links:
-                            lines.extend(file_links)
-
-                    lines.append("")
+                files = c.get("files", [])
+                if files:
+                    # Tree-style ├─ / └─ + полный путь. Каждая строка -- clickable.
+                    shown = files[:8]
+                    overflow = max(0, len(files) - 8)
+                    for i, f in enumerate(shown):
+                        is_last = (i == len(shown) - 1) and overflow == 0
+                        marker = "└─" if is_last else "├─"
+                        fname = escape_html(f["filename"])
+                        furl = escape_html(build_github_file_url(c["html_url"], f["filename"], f))
+                        adds = f.get("additions", 0)
+                        dels = f.get("deletions", 0)
+                        stats = f" <i>(+{adds}/-{dels})</i>" if (adds or dels) else ""
+                        lines.append(f"  {marker} <a href=\"{furl}\">{fname}</a>{stats}")
+                    if overflow:
+                        lines.append(f"  └─ <i>... +{overflow} more</i>")
+                lines.append("")
 
             # CI / Workflow runs
             workflows = repo.get("workflow_runs", [])
@@ -641,7 +636,7 @@ class MessageBuilder:
                 pr_parts = [f"#{p['number']} {escape_html(p['title'])}" for p in prs[:2]]
                 lines.append(f"<b>PR:</b> " + " | ".join(pr_parts))
 
-            lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+            lines.append("────────────────────")
 
         reply_markup = {"inline_keyboard": buttons} if buttons else None
         return "\n".join(lines), reply_markup
