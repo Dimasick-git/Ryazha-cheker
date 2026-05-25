@@ -675,31 +675,28 @@ class GitHubMonitor:
         github_token      = os.getenv("G_TOKEN", "").strip()
         telegram_token    = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
         self.chat_id      = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-        self.username     = os.getenv("G_USERNAME", "Dimasick-git").strip()
+        self.username     = os.getenv("G_USERNAME", "").strip()
 
         # Comma-separated list of repo names to skip, e.g. "Ryazhahand-Overlay,Sys-clk,Atmosphere"
         skip_raw = os.getenv("SKIP_REPOS", "").strip()
         self.skip_repos: set = {r.strip() for r in skip_raw.split(",") if r.strip()}
 
-        missing = []
-        if not github_token:   missing.append("G_TOKEN")
-        if not telegram_token: missing.append("TELEGRAM_BOT_TOKEN")
-        if not self.chat_id:   missing.append("TELEGRAM_CHAT_ID")
-
         self.dry_run = "--dry-run" in sys.argv or os.getenv("DRY_RUN", "").lower() in ("1", "true")
+
+        missing = []
+        if not github_token:    missing.append("G_TOKEN")
+        if not self.username:   missing.append("G_USERNAME")
+        if not self.dry_run:
+            if not telegram_token: missing.append("TELEGRAM_BOT_TOKEN")
+            if not self.chat_id:   missing.append("TELEGRAM_CHAT_ID")
+
+        if missing:
+            print(f"FATAL missing env: {', '.join(missing)}")
+            print("   Настройте их: Settings → Secrets and variables → Actions")
+            sys.exit(1)
 
         if self.dry_run:
             print("DRY-RUN: no telegram delivery.")
-            # В dry-run режиме токен Telegram не обязателен
-            if not github_token:
-                missing.append("G_TOKEN")
-        else:
-            if missing:
-                print(f"FATAL missing env: {', '.join(missing)}")
-                print("   Настройте их: Settings → Secrets and variables → Actions")
-                sys.exit(1)
-
-        # Fix #6: removed duplicate dead code block that checked missing after sys.exit(1)
 
         self.github   = GitHubClient(github_token, self.username)
         # Fix #5: TELEGRAM_TOPIC_ID properly parsed as integer

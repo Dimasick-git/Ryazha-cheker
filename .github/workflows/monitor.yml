@@ -26,11 +26,13 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      # ── Восстанавливаем last_check.json из кэша ───────────────
+      # ── Восстанавливаем состояние монитора из кэша ───────────
       - name: Restore monitor state
         uses: actions/cache@v4
         with:
-          path: last_check.json
+          path: |
+            last_check.json
+            repo_states_*.json
           key: monitor-state-${{ github.ref_name }}
           restore-keys: monitor-state-
 
@@ -142,7 +144,9 @@ jobs:
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: last_check.json
+          path: |
+            last_check.json
+            repo_states_*.json
           key: monitor-state-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: Summary

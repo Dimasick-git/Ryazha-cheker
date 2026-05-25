@@ -6,27 +6,27 @@ on:
 jobs:
   test-telegram:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      
+
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-        
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install requests
-        
+        pip install requests pytest
+
     - name: Test Telegram API
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
         echo "Testing Telegram connection..."
-        echo "Bot token: ${TELEGRAM_BOT_TOKEN:0:10}..."
-        echo "Chat ID: $TELEGRAM_CHAT_ID"
-        python test_telegram.py
+        echo "Bot token set: ${{ secrets.TELEGRAM_BOT_TOKEN != '' }}"
+        echo "Chat ID set: ${{ secrets.TELEGRAM_CHAT_ID != '' }}"
+        python -m pytest test_telegram.py -v
