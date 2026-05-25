@@ -235,7 +235,7 @@ class GitHubClient:
                 ):
                     reset_ts = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
                     wait = max(reset_ts - int(time.time()), delay)
-                    print(f"⚠️  Rate limit (попытка {attempt}/{_retry}). Ожидание {wait}с...")
+                    print(f"WARN rate-limit attempt={attempt}/{_retry} wait={wait}s")
                     time.sleep(wait)
                     delay *= 2
                     continue
@@ -243,19 +243,19 @@ class GitHubClient:
                 if resp.status_code == 200:
                     return resp.json()
 
-                print(f"❌ Ошибка GitHub API {resp.status_code}: {url}")
+                print(f"ERR github-api status={resp.status_code} url={url}")
                 print(f"   Ответ: {resp.text[:200]}")
                 return None
 
             except requests.exceptions.Timeout:
-                print(f"⏱️  Таймаут (попытка {attempt}/{_retry}): {url}")
+                print(f"⏱  Таймаут (попытка {attempt}/{_retry}): {url}")
                 if attempt < _retry:
                     time.sleep(delay)
                     delay *= 2
                     continue
                 return None
             except requests.exceptions.RequestException as e:
-                print(f"🌐 Ошибка сети: {e}")
+                print(f"ERR network: {e}")
                 return None
         return None
 
@@ -451,12 +451,12 @@ class TelegramClient:
             data = resp.json()
             if data.get("ok"):
                 bot = data["result"]
-                print(f"✅ Бот: @{bot['username']} (id={bot['id']})")
+                print(f"OK bot=@{bot['username']} id={bot['id']}")
                 return True
-            print(f"❌ Ошибка getMe: {data.get('description')}")
+            print(f"ERR getMe: {data.get('description')}")
             return False
         except Exception as e:
-            print(f"❌ Исключение getMe: {e}")
+            print(f"ERR getMe-exc: {e}")
             return False
 
     def send(self, text: str, parse_mode: str = "HTML", disable_web_page_preview: bool = True, reply_markup: Optional[Dict] = None) -> bool:
@@ -465,23 +465,23 @@ class TelegramClient:
         Автоматически разбивает на части если > 4096 символов.
         """
         parts = self._split(text)
-        print(f"📤 Отправка {len(parts)} части(ей) в чат {self.chat_id}")
+        print(f"SEND parts={len(parts)} chat={self.chat_id}")
         all_ok = True
         for i, part in enumerate(parts, 1):
             # Кнопки шлём только с последней частью
             current_markup = reply_markup if i == len(parts) else None
             ok = self._send_part(part, parse_mode, disable_web_page_preview, current_markup)
             if ok:
-                print(f"  ✅ Часть {i}/{len(parts)} отправлена ({len(part)} символов)")
+                print(f"  OK part={i}/{len(parts)} bytes={len(part)}")
             else:
-                print(f"  ❌ Часть {i}/{len(parts)} не отправлена — пробуем простой текст")
+                print(f"  RETRY part={i}/{len(parts)} fallback=plain")
                 # Fallback: убираем HTML теги и шлём plain
                 plain = self._strip_html(part)
                 ok    = self._send_part(plain, parse_mode=None)
                 if ok:
-                    print(f"  ✅ Часть {i}/{len(parts)} отправлена как простой текст")
+                    print(f"  OK part={i}/{len(parts)} fallback=plain")
                 else:
-                    print(f"  ❌ Часть {i}/{len(parts)} полностью не отправлена")
+                    print(f"  FAIL part={i}/{len(parts)} all-attempts-exhausted")
                     all_ok = False
 
             if i < len(parts):
@@ -516,18 +516,18 @@ class TelegramClient:
                     return True
 
                 desc = data.get("description", "неизвестная ошибка")
-                print(f"  ⚠️  Ошибка Telegram: {desc}")
+                print(f"  WARN telegram: {desc}")
 
                 # Подсказки
                 if "chat not found" in desc.lower():
-                    print("  💡 Проверьте CHAT_ID (отправьте /start боту)")
+                    print("  hint: verify CHAT_ID (send /start to bot)")
                 elif "blocked" in desc.lower():
-                    print("  💡 Пользователь заблокировал бота")
+                    print("  hint: user blocked the bot")
                 elif "parse" in desc.lower():
-                    print("  💡 Ошибка HTML парсинга — будет попытка как plain text")
+                    print("  hint: HTML parse error; retry as plain")
                 elif "too many requests" in desc.lower():
                     retry_after = data.get("parameters", {}).get("retry_after", delay)
-                    print(f"  ⏳ Flood control — ждём {retry_after}s")
+                    print(f"   Flood control — ждём {retry_after}s")
                     time.sleep(retry_after)
                     delay = retry_after
                     continue
@@ -535,18 +535,18 @@ class TelegramClient:
                 return False
 
             except requests.exceptions.Timeout:
-                print(f"  ⏱️  Таймаут Telegram (попытка {attempt + 1}/3) — повтор через {delay}s")
+                print(f"  ⏱  Таймаут Telegram (попытка {attempt + 1}/3) — повтор через {delay}s")
                 time.sleep(delay)
                 delay *= 2
             except requests.exceptions.ConnectionError as e:
-                print(f"  🌐 Ошибка соединения (попытка {attempt + 1}/3): {e} — повтор через {delay}s")
+                print(f"  RETRY conn attempt={attempt + 1}/3 err={e} backoff={delay}s")
                 time.sleep(delay)
                 delay *= 2
             except Exception as e:
-                print(f"  ❌ Исключение Telegram: {e}")
+                print(f"  ERR telegram-exc: {e}")
                 return False
 
-        print("  ❌ Все попытки исчерпаны для _send_part")
+        print("  FAIL _send_part: all-attempts-exhausted")
         return False
 
     @staticmethod
@@ -602,8 +602,8 @@ class MessageBuilder:
 
         now = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
         lines += [
-            f"🔔 <b>GitHub Monitor</b> — <code>{escape_html(username)}</code>",
-            f"🕐 {now}",
+            f"<b>GITHUB MONITOR</b> [<code>{escape_html(username)}</code>]",
+            f"<i>ts: {now}</i>",
             "━━━━━━━━━━━━━━━━━━━━━━━━",
             "",
         ]
@@ -611,15 +611,15 @@ class MessageBuilder:
         changed_repos = [r for r in repos_data if r.get("recent_commits")][:5]
 
         if not changed_repos:
-            return "✅ Активности не обнаружено.", None
+            return "<i>status: idle. no changes detected.</i>", None
 
         total_commits = sum(len(r.get("recent_commits", [])) for r in changed_repos)
-        lines.append(f"📦 Репозиториев с изменениями: <b>{len(changed_repos)}</b>  |  📝 Новых коммитов: <b>{total_commits}</b>\n")
+        lines.append(f"repos_changed=<b>{len(changed_repos)}</b> | commits_new=<b>{total_commits}</b>\n")
 
         # Fix #11: PR/issue stats summary line
         total_prs = sum(len(r.get("open_prs", [])) for r in repos_data)
         total_issues = sum(r.get("open_issues", 0) for r in repos_data)
-        lines.append(f"🔍 Всего PR: <b>{total_prs}</b>  |  🐛 Issues: <b>{total_issues}</b>\n")
+        lines.append(f" Всего PR: <b>{total_prs}</b>  |   Issues: <b>{total_issues}</b>\n")
 
         for repo in changed_repos:
             name = escape_html(repo["name"])
@@ -631,17 +631,17 @@ class MessageBuilder:
             issues = repo.get("open_issues", 0)
             repo_url = f"https://github.com/{username}/{repo['name']}"
 
-            star_str = f"⭐{stars}"
+            star_str = f"stars={stars}"
             if star_delta > 0:
                 star_str += f" <b>(+{star_delta})</b>"
-            fork_str = f"🍴{forks}" if forks else ""
+            fork_str = f"forks={forks}" if forks else ""
             if fork_delta > 0:
                 fork_str += f" <b>(+{fork_delta})</b>"
-            issue_str = f"🐛{issues}" if issues else ""
+            issue_str = f"issues={issues}" if issues else ""
 
             meta_parts = [s for s in [star_str, fork_str, issue_str] if s]
-            lines.append(f"📁 <b>{name}</b>  <i>{lang}</i>  {' · '.join(meta_parts)}")
-            buttons.append([{"text": f"🔗 {repo['name']}", "url": repo_url}])
+            lines.append(f"<b>[{name}]</b> <i>{lang}</i>  {' · '.join(meta_parts)}")
+            buttons.append([{"text": f"open: {repo['name']}", "url": repo_url}])
 
             # Коммиты
             commits = repo.get("recent_commits", [])[:2]
@@ -656,7 +656,7 @@ class MessageBuilder:
                     url = escape_html(c["html_url"])
 
                     lines.append(f"  • <a href=\"{url}\"><code>{sha}</code></a> {msg}")
-                    lines.append(f"    👤 {auth}  🕐 {date}")
+                    lines.append(f"    by {auth} @ {date}")
 
                     files = c.get("files", [])
                     if files:
@@ -668,7 +668,7 @@ class MessageBuilder:
                         for f in files[:3]:
                             fname = escape_html(f["filename"])
                             furl = escape_html(build_github_file_url(c["html_url"], f["filename"], f))
-                            file_links.append(f"    📄 <a href=\"{furl}\">{fname}</a>")
+                            file_links.append(f"    - <a href=\"{furl}\">{fname}</a>")
                         if file_links:
                             lines.extend(file_links)
 
@@ -692,13 +692,13 @@ class MessageBuilder:
                 tag = escape_html(r["tag"])
                 rname = escape_html(r["name"])
                 rurl = escape_html(r["html_url"])
-                lines.append(f"🚀 <b>Релиз:</b> <a href=\"{rurl}\">{tag}</a> — {rname}")
+                lines.append(f"<b>RELEASE:</b> <a href=\"{rurl}\">{tag}</a> — {rname}")
 
             # PRs
             prs = repo.get("open_prs", [])
             if prs:
                 pr_parts = [f"#{p['number']} {escape_html(p['title'])}" for p in prs[:2]]
-                lines.append(f"🔀 <b>PR:</b> " + " | ".join(pr_parts))
+                lines.append(f"<b>PR:</b> " + " | ".join(pr_parts))
 
             lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
 
@@ -710,21 +710,21 @@ class MessageBuilder:
 # MONITOR
 # ──────────────────────────────────────────────────────────────
 WORKFLOW_ICONS = {
-    "success":   "✅",
-    "failure":   "❌",
-    "cancelled": "⛔",
-    "skipped":   "⏭️",
-    "in_progress": "🔄",
-    "queued":    "⏳",
-    "waiting":   "⏳",
-    "running":   "🔄",
-    None:        "❓",
+    "success":   "[OK]",
+    "failure":   "[FAIL]",
+    "cancelled": "[CANCEL]",
+    "skipped":   "[SKIP]",
+    "in_progress": "[RUN]",
+    "queued":    "[QUEUE]",
+    "waiting":   "[WAIT]",
+    "running":   "[RUN]",
+    None:        "[?]",
 }
 
 
 def workflow_icon(conclusion: Optional[str], status: str) -> str:
     if status in ("in_progress", "queued", "waiting"):
-        return WORKFLOW_ICONS.get(status, "🔄")
+        return WORKFLOW_ICONS.get(status, "[RUN]")
     return WORKFLOW_ICONS.get(conclusion, WORKFLOW_ICONS[None])
 
 
@@ -753,13 +753,13 @@ class GitHubMonitor:
         self.dry_run = "--dry-run" in sys.argv or os.getenv("DRY_RUN", "").lower() in ("1", "true")
 
         if self.dry_run:
-            print("🔍 DRY-RUN режим: Telegram уведомления отправляться не будут.")
+            print("DRY-RUN: no telegram delivery.")
             # В dry-run режиме токен Telegram не обязателен
             if not github_token:
                 missing.append("G_TOKEN")
         else:
             if missing:
-                print(f"❌ Отсутствуют переменные окружения: {', '.join(missing)}")
+                print(f"FATAL missing env: {', '.join(missing)}")
                 print("   Настройте их: Settings → Secrets and variables → Actions")
                 sys.exit(1)
 
@@ -807,9 +807,9 @@ class GitHubMonitor:
         info["star_delta"] = star_delta
         info["fork_delta"] = fork_delta
         if star_delta:
-            print(f"[{name}] ⭐+{star_delta}")
+            print(f"[{name}] stars +{star_delta}")
         if fork_delta:
-            print(f"[{name}] 🍴+{fork_delta}")
+            print(f"[{name}] forks +{fork_delta}")
 
         # Коммиты: 1 запрос для списка SHA
         all_commits = self.github.list_commits(name, count=MAX_COMMITS)
@@ -1056,12 +1056,12 @@ if __name__ == "__main__":
         monitor = GitHubMonitor()
         monitor.run()
     except KeyboardInterrupt:
-        print("\n⏹️  Interrupted")
+        print("\n⏹  Interrupted")
         sys.exit(0)
     except SystemExit:
         raise
     except Exception as e:
         import traceback
-        print(f"\n💥 Unexpected error: {e}")
+        print(f"\n Unexpected error: {e}")
         traceback.print_exc()
         sys.exit(1)

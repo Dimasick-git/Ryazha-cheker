@@ -1,50 +1,69 @@
-# GitHub Repository Monitor 🚀
+# Ryazha-cheker
 
-Профессиональный мониторинг GitHub-репозиториев с уведомлениями в Telegram. Бот отслеживает новые коммиты, релизы и Pull Requests, предоставляя информацию в чистом и удобном виде.
+GitHub repository monitor. Опрашивает GitHub API по cron'у, отправляет diff (commits / releases / PRs / workflow runs) в Telegram.
 
-## ✨ Особенности
+## Stack
 
-- **Умная память**: Бот запоминает последние коммиты и присылает уведомления только о новых изменениях.
-- **Инженерный дизайн**: Чистый интерфейс на русском языке с аккуратными отступами и ASCII-разделителями.
-- **Прямые ссылки**: Ссылки на измененные файлы ведут прямо на конкретную версию в коммите.
-- **Дерево файлов**: Визуальное отображение структуры изменений.
-- **Inline-кнопки**: Быстрый переход к репозиториям прямо из Telegram.
+- `main.py` — single-file monitor (~1100 LOC). GitHub API + Telegram Bot API через `requests`.
+- `repo_states_<user>.json` — persistent state (last seen sha по каждому репо). Кешируется между запусками GitHub Actions.
+- `.github/workflows/monitor.yml` — cron `*/30 * * * *`, Python 3.11, ubuntu-latest.
 
-## 🛠 Настройка
+## Env
 
-### 1. Секреты GitHub
-Для работы бота добавьте следующие секреты в настройках вашего репозитория (`Settings` -> `Secrets and variables` -> `Actions`):
+```
+G_TOKEN=<github_pat>
+G_USERNAME=<owner>
+TELEGRAM_BOT_TOKEN=<bot_token>
+TELEGRAM_CHAT_ID=<chat_id>
+TELEGRAM_TOPIC_ID=<thread_id>     # optional, для супергрупп
+SKIP_REPOS=repo1,repo2            # optional, исключения
+```
 
-| Секрет | Описание |
-| :--- | :--- |
-| `G_TOKEN` | Ваш GitHub Personal Access Token |
-| `G_USERNAME` | Ваш логин на GitHub |
-| `TELEGRAM_BOT_TOKEN` | Токен вашего Telegram-бота от @BotFather |
-| `TELEGRAM_CHAT_ID` | Ваш Chat ID (можно узнать у @userinfobot) |
-| `TELEGRAM_TOPIC_ID` | ID темы (опционально) |
+GitHub PAT: scopes `repo` (read), `read:user`. Без `repo` приватные не видны.
+Telegram chat_id: `@userinfobot`. Bot token: `@BotFather`.
 
-### 2. Автоматизация
-Бот настроен на автоматический запуск через GitHub Actions каждые 30 минут. Настройки расписания находятся в `.github/workflows/monitor.yml`.
+## Deploy
 
-## 📂 Структура проекта
+В репозитории `Settings -> Secrets and variables -> Actions` создать все env как secrets с такими же именами. Workflow стартует автоматически по cron'у каждые 30 минут + по `workflow_dispatch`.
 
-- `main.py` — основной код мониторинга и логика уведомлений.
-- `test_message_formatting.py` — тесты форматирования на русском языке.
-- `repo_states_[username].json` — файл памяти бота (создается автоматически).
+## Run locally
 
-## 🚀 Запуск
-
-### Локально:
-```bash
+```sh
 pip install -r requirements.txt
-# Установите переменные окружения и запустите:
-python main.py
+cp .env.example .env       # заполнить env
+python main.py             # один tick
+python main.py --dry-run   # без отправки в Telegram
 ```
 
-### Тестирование:
-```bash
-python test_message_formatting.py
+## Test
+
+```sh
+python -m pytest test_message_formatting.py
+python -m pytest test_telegram.py   # требует живые TELEGRAM_* env
 ```
 
----
-**Автор: [Dimasick-git](https://github.com/Dimasick-git)**
+## Output format
+
+Telegram сообщение собирается из секций:
+
+```
+GITHUB MONITOR [username]
+ts: 2026-05-25 14:30
+
+repos_changed=3 | commits_new=12
+prs_total=4 | issues=7
+
+[repo-name] python  stars=42 forks=3 issues=1
+    by author @ 2026-05-25 14:12
+    - path/to/file.py
+    - another/file.cpp
+
+RELEASE: v2.4.0 — short title
+PR: #123 title | #145 another
+```
+
+Workflow runs показываются с тегами `[OK]`, `[FAIL]`, `[RUN]`, `[QUEUE]`, `[CANCEL]`, `[SKIP]`.
+
+## Лицензия
+
+MIT. См. `LICENSE`. Автор: Dimasick-git.

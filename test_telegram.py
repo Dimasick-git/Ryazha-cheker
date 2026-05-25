@@ -36,7 +36,7 @@ def test_telegram_send_message():
     url = f'https://api.telegram.org/bot{bot_token}/sendMessage'
     payload = {
         'chat_id': chat_id,
-        'text': '🧪 Тестовое сообщение от GitHub Monitor\n\nЕсли вы видите это, интеграция работает!',
+        'text': 'TEST github-monitor\n\nif visible, integration ok.',
     }
     resp = requests.post(url, json=payload, timeout=30)
     assert resp.status_code == 200, f'HTTP {resp.status_code}: {resp.text}'
