@@ -4,6 +4,7 @@ GitHub Repository Monitor
 Отслеживает репозитории пользователя и отправляет уведомления в Telegram
 """
 
+import fnmatch
 import os
 import sys
 import time
@@ -30,8 +31,6 @@ MAX_COMMITS        = 5
 MAX_PRS            = 3
 MAX_RELEASES       = 1  # Только latest релиз
 MAX_WORKFLOWS      = 3
-MAX_REPOS_WITH_PRS = 3
-
 # Задержка между запросами к GitHub API (rate limit protection)
 API_DELAY          = 0.5   # секунд
 
@@ -685,9 +684,10 @@ class GitHubMonitor:
         self.chat_id      = os.getenv("TELEGRAM_CHAT_ID", "").strip()
         self.username     = os.getenv("G_USERNAME", "").strip()
 
-        # Comma-separated list of repo names to skip, e.g. "Ryazhahand-Overlay,Sys-clk,Atmosphere"
+        # Comma-separated list of repo names/glob patterns to skip.
+        # Supports fnmatch wildcards, e.g. "Ryazha*,Sys-clk,Atmosphere"
         skip_raw = os.getenv("SKIP_REPOS", "").strip()
-        self.skip_repos: set = {r.strip() for r in skip_raw.split(",") if r.strip()}
+        self.skip_patterns: list = [r.strip() for r in skip_raw.split(",") if r.strip()]
 
         self.dry_run = "--dry-run" in sys.argv or os.getenv("DRY_RUN", "").lower() in ("1", "true")
 
@@ -855,8 +855,8 @@ class GitHubMonitor:
     def run(self):
         print(f"Запуск GitHub монитора для: {self.username}")
         print(f"Время: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
-        if self.skip_repos:
-            print(f"Пропускаем репозитории: {', '.join(sorted(self.skip_repos))}")
+        if self.skip_patterns:
+            print(f"Паттерны пропуска репозиториев: {', '.join(self.skip_patterns)}")
         print()
 
         # Быстрая проверка — были ли вообще обновления
@@ -895,8 +895,11 @@ class GitHubMonitor:
             )
             sys.exit(0)
 
-        # Фильтруем пропускаемые репозитории
-        repositories = [r for r in repositories if r["name"] not in self.skip_repos]
+        # Фильтруем пропускаемые репозитории (поддержка fnmatch glob-паттернов)
+        repositories = [
+            r for r in repositories
+            if not any(fnmatch.fnmatch(r["name"], p) for p in self.skip_patterns)
+        ]
         print(f"Найдено репозиториев: {len(repositories)}")
 
         # Собираем детальную информацию
@@ -941,9 +944,6 @@ class GitHubMonitor:
             if result["include_in_report"]:
                 repos_data.append(result["info"])
 
-        # Сохраняем все обновлённые состояния одной записью
-        save_all_repository_states(self.username, all_states)
-
         if not has_real_changes:
             print()
             print("Реальных изменений в содержимом не найдено.")
@@ -983,6 +983,10 @@ class GitHubMonitor:
         print()
         if success:
             print("Мониторинг успешно завершен")
+            # Сохраняем состояния ТОЛЬКО после успешной отправки.
+            # Если сохранить раньше и Telegram упадёт — следующий запуск
+            # не найдёт изменений (SHA уже в known_shas) и пропустит уведомление.
+            save_all_repository_states(self.username, all_states)
             if latest_update:
                 save_last_check_date(latest_update)
         else:
