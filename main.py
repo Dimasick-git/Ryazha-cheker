@@ -106,6 +106,30 @@ def load_last_check_date() -> Optional[str]:
         return None
 
 
+def load_last_message_hash() -> Optional[str]:
+    """Загружает хэш последнего отправленного сообщения (дедупликация)."""
+    try:
+        if os.path.exists('last_check.json'):
+            with open('last_check.json', 'r', encoding='utf-8') as f:
+                return json.load(f).get('last_message_hash')
+    except Exception:
+        pass
+    return None
+
+
+def save_last_message_hash(h: str) -> None:
+    """Обновляет хэш последнего отправленного сообщения."""
+    try:
+        data: Dict[str, Any] = {}
+        if os.path.exists('last_check.json'):
+            with open('last_check.json', 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        data['last_message_hash'] = h
+        _atomic_json_write('last_check.json', data)
+    except Exception as e:
+        print(f'Ошибка сохранения хэша сообщения: {e}')
+
+
 def _atomic_json_write(path: str, data: Any) -> None:
     """Пишет JSON атомарно через временный файл (защита от обрыва записи)."""
     dir_name = os.path.dirname(os.path.abspath(path)) or '.'
@@ -695,6 +719,7 @@ class GitHubMonitor:
         self.skip_patterns: list = [r.strip() for r in skip_raw.split(",") if r.strip()]
 
         self.dry_run = "--dry-run" in sys.argv or os.getenv("DRY_RUN", "").lower() in ("1", "true")
+        self.summary_mode = "--summary" in sys.argv or os.getenv("SUMMARY_MODE", "").lower() in ("1", "true")
 
         missing = []
         if not github_token:    missing.append("G_TOKEN")
@@ -857,12 +882,85 @@ class GitHubMonitor:
             "include_in_report": include_in_report,
         }
 
+    def _run_summary(self) -> None:
+        """Режим --summary: компактный дайджест всех репозиториев."""
+        print("SUMMARY MODE: формирую дайджест всех репозиториев...")
+        repositories = self.github.get_repositories()
+        if not repositories:
+            print("Репозитории не найдены.")
+            return
+
+        repositories = [
+            r for r in repositories
+            if not any(fnmatch.fnmatch(r["name"], p) for p in self.skip_patterns)
+        ]
+
+        all_states = load_all_repository_states(self.username)
+        total_stars = sum(r.get("stargazers_count", 0) for r in repositories)
+        total_forks = sum(r.get("forks_count", 0) for r in repositories)
+        total_issues = sum(r.get("open_issues_count", 0) for r in repositories)
+        repos_with_ci = sum(1 for r in repositories if r.get("has_pages") or r.get("has_actions"))
+
+        now = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+        lines = [
+            f"<b>GITHUB DIGEST</b> [<code>{escape_html(self.username)}</code>] · <i>{now}</i>",
+            "",
+            f"<b>Репозиториев:</b> {len(repositories)} · <b>Звёзды:</b> {total_stars} · <b>Форки:</b> {total_forks} · <b>Issues:</b> {total_issues}",
+            "",
+            "<b>Топ по звёздам:</b>",
+        ]
+        top_by_stars = sorted(repositories, key=lambda r: r.get("stargazers_count", 0), reverse=True)[:10]
+        for i, r in enumerate(top_by_stars, 1):
+            name = escape_html(r["name"])
+            stars = r.get("stargazers_count", 0)
+            lang = escape_html(r.get("language") or "—")
+            pushed = r.get("pushed_at", "")[:10]
+            old_stars = all_states.get(r["name"], {}).get("stars", stars)
+            delta = stars - old_stars
+            delta_str = f" <b>(+{delta})</b>" if delta > 0 else ""
+            url = f"https://github.com/{self.username}/{r['name']}"
+            lines.append(f"  {i}. <a href=\"{url}\">{name}</a> — ★{stars}{delta_str} · {lang} · {pushed}")
+
+        lines += ["", "<b>Последние обновления:</b>"]
+        recent = sorted(repositories, key=lambda r: r.get("pushed_at", ""), reverse=True)[:5]
+        for r in recent:
+            name = escape_html(r["name"])
+            pushed = fmt_date(r.get("pushed_at", ""))
+            url = f"https://github.com/{self.username}/{r['name']}"
+            lines.append(f"  • <a href=\"{url}\">{name}</a> — {pushed}")
+
+        message = "\n".join(lines)
+        print(f"Длина дайджеста: {len(message)} символов")
+
+        if self.dry_run:
+            print(re.sub(r"<[^>]+>", "", message))
+            return
+
+        if not self.telegram.validate():
+            print("Неверный токен Telegram. Выход.")
+            sys.exit(1)
+
+        self.telegram.send(message)
+        # Обновляем состояния звёзд
+        for r in repositories:
+            name = r["name"]
+            if name not in all_states:
+                all_states[name] = {}
+            all_states[name]["stars"] = r.get("stargazers_count", 0)
+            all_states[name]["forks"] = r.get("forks_count", 0)
+        save_all_repository_states(self.username, all_states)
+        print("Дайджест отправлен.")
+
     def run(self):
         print(f"Запуск GitHub монитора для: {self.username}")
         print(f"Время: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
         if self.skip_patterns:
             print(f"Паттерны пропуска репозиториев: {', '.join(self.skip_patterns)}")
         print()
+
+        if self.summary_mode:
+            self._run_summary()
+            return
 
         # Быстрая проверка — были ли вообще обновления
         print("Проверка новых релизов...")
@@ -986,6 +1084,18 @@ class GitHubMonitor:
                 save_last_check_date(latest_update)
             return
 
+        # Дедупликация: пропускаем если контент не изменился
+        import hashlib as _hashlib
+        msg_hash = _hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
+        last_hash = load_last_message_hash()
+        if last_hash and last_hash == msg_hash:
+            print()
+            print(f"Сообщение не изменилось (hash={msg_hash}). Пропускаем отправку.")
+            save_all_repository_states(self.username, all_states)
+            if latest_update:
+                save_last_check_date(latest_update)
+            return
+
         print()
         print("Отправка в Telegram...")
         success = self.telegram.send(message, reply_markup=markup)
@@ -999,6 +1109,7 @@ class GitHubMonitor:
             save_all_repository_states(self.username, all_states)
             if latest_update:
                 save_last_check_date(latest_update)
+            save_last_message_hash(msg_hash)
         else:
             print("Мониторинг завершен с ошибками отправки")
             self.telegram.send(
