@@ -4,19 +4,20 @@ GitHub Repository Monitor
 Отслеживает репозитории пользователя и отправляет уведомления в Telegram
 """
 
-import fnmatch
-import os
-import sys
-import time
-import tempfile
-import requests
-import hashlib
-import json
-import re
 import concurrent.futures
+import fnmatch
+import json
+import os
+import re
+import sys
+import tempfile
+import threading
+import time
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote
+
+import requests
 
 
 # ──────────────────────────────────────────────────────────────
@@ -148,6 +149,9 @@ def save_all_repository_states(username: str, states: Dict[str, Any]) -> None:
 
 
 class GitHubClient:
+    # Limits concurrent API calls across all threads to avoid bursting the rate limit.
+    _api_semaphore = threading.Semaphore(3)
+
     def __init__(self, token: str, username: str):
         self.username = username
         self.session  = requests.Session()
@@ -162,7 +166,8 @@ class GitHubClient:
         delay = 2
         for attempt in range(1, _retry + 1):
             try:
-                resp = self.session.get(url, params=params, timeout=20)
+                with self._api_semaphore:
+                    resp = self.session.get(url, params=params, timeout=20)
 
                 if resp.status_code == 429 or (
                     resp.status_code == 403
@@ -865,7 +870,7 @@ class GitHubMonitor:
         latest_update = self.github.get_latest_repo_update()
         last_check = load_last_check_date()
 
-        if latest_update and last_check and latest_update == last_check:
+        if latest_update and last_check and latest_update <= last_check:
             print(f"Новых релизов не найдено. Последнее обновление: {latest_update}")
             print("Мониторинг не требуется. Выход.")
             return
