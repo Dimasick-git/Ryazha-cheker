@@ -879,12 +879,13 @@ class GitHubMonitor:
             print(f"Обнаружены новые изменения! Последнее обновление: {latest_update}")
             print(f"Предыдущая проверка: {last_check or 'первая'}")
 
-        # Валидируем Telegram бота
-        print()
-        print("Проверка Telegram бота...")
-        if not self.telegram.validate():
-            print("Неверный токен Telegram. Выход.")
-            sys.exit(1)
+        # Валидируем Telegram бота (пропускаем в dry_run — токен может быть пустым)
+        if not self.dry_run:
+            print()
+            print("Проверка Telegram бота...")
+            if not self.telegram.validate():
+                print("Неверный токен Telegram. Выход.")
+                sys.exit(1)
 
         # Получаем репозитории
         print()
@@ -923,16 +924,20 @@ class GitHubMonitor:
             result = self._collect_repo_data(repo, old_state)
             return repo["name"], result
 
+        total_repos = len(repositories)
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
             futures = {executor.submit(_worker, repo): repo["name"] for repo in repositories}
             results: Dict[str, Dict] = {}
+            done_count = 0
             for future in concurrent.futures.as_completed(futures):
                 repo_name = futures[future]
+                done_count += 1
                 try:
                     name, result = future.result()
                     results[name] = result
+                    print(f"  [{done_count}/{total_repos}] {name} — готово")
                 except Exception as exc:
-                    print(f"[{repo_name}] Ошибка сбора данных: {exc}")
+                    print(f"  [{done_count}/{total_repos}] {repo_name} — ошибка: {exc}")
 
         # Process results sequentially (state saving must be sequential)
         for repo in repositories:
