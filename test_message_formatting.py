@@ -70,12 +70,12 @@ def тест_построитель_сообщений_не_использует
     )
 
     assert "```" not in message
-    assert "<pre>" in message and "</pre>" in message
+    assert "<code>" in message
     assert "https://github.com/owner/repo/blob/abc1234/docs/changelog.md" in message
-    assert "Отчёт мониторинга" in message
+    assert "GITHUB MONITOR" in message
     assert markup is not None
     assert "inline_keyboard" in markup
-    assert "Открыть repo" in markup["inline_keyboard"][0][0]["text"]
+    assert "open: repo" in markup["inline_keyboard"][0][0]["text"]
 
 
 def тест_ссылка_на_файл_без_blob_url_и_raw_url_строится_из_sha():
