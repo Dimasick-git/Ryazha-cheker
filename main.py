@@ -8,6 +8,7 @@ import concurrent.futures
 import fnmatch
 import json
 import os
+import random
 import re
 import sys
 import tempfile
@@ -206,7 +207,9 @@ class GitHubClient:
                 ):
                     reset_ts = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
                     wait = max(reset_ts - int(time.time()), delay)
-                    print(f"WARN rate-limit attempt={attempt}/{_retry} wait={wait}s")
+                    # Jitter prevents all 6 threads from retrying simultaneously.
+                    wait += random.uniform(0.5, delay)
+                    print(f"WARN rate-limit attempt={attempt}/{_retry} wait={wait:.1f}s")
                     time.sleep(wait)
                     delay *= 2
                     continue
@@ -1034,17 +1037,24 @@ class GitHubMonitor:
             return repo["name"], result
 
         total_repos = len(repositories)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6, thread_name_prefix="gh-mon") as executor:
             futures = {executor.submit(_worker, repo): repo["name"] for repo in repositories}
             results: Dict[str, Dict] = {}
             done_count = 0
-            for future in concurrent.futures.as_completed(futures):
+            # 5-minute hard cap so a hung thread can't block the whole run.
+            try:
+                completed = concurrent.futures.as_completed(futures, timeout=300)
+            except TypeError:
+                completed = concurrent.futures.as_completed(futures)
+            for future in completed:
                 repo_name = futures[future]
                 done_count += 1
                 try:
-                    name, result = future.result()
+                    name, result = future.result(timeout=30)
                     results[name] = result
                     print(f"  [{done_count}/{total_repos}] {name} — готово")
+                except concurrent.futures.TimeoutError:
+                    print(f"  [{done_count}/{total_repos}] {repo_name} — таймаут (>30с)")
                 except Exception as exc:
                     print(f"  [{done_count}/{total_repos}] {repo_name} — ошибка: {exc}")
 
