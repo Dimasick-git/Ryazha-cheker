@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
+import hashlib
+
 import requests
 
 
@@ -144,7 +146,12 @@ def _atomic_json_write(path: str, data: Any) -> None:
 def save_last_check_date(date_str: str) -> None:
     """Сохраняет дату последней проверки в JSON файл (raw ISO string)."""
     try:
-        _atomic_json_write('last_check.json', {'last_check_date': date_str})
+        data: Dict[str, Any] = {}
+        if os.path.exists('last_check.json'):
+            with open('last_check.json', 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        data['last_check_date'] = date_str
+        _atomic_json_write('last_check.json', data)
         print(f'Дата последней проверки обновлена: {date_str}')
     except Exception as e:
         print(f'Ошибка сохранения даты последней проверки: {e}')
@@ -733,8 +740,12 @@ class GitHubMonitor:
             print("   Настройте их: Settings → Secrets and variables → Actions")
             sys.exit(1)
 
+        self.force_send = "--force" in sys.argv or os.getenv("FORCE_SEND", "").lower() in ("1", "true")
+
         if self.dry_run:
             print("DRY-RUN: no telegram delivery.")
+        if self.force_send:
+            print("FORCE: bypassing early-exit and dedup checks.")
 
         self.github   = GitHubClient(github_token, self.username)
         # Fix #5: TELEGRAM_TOPIC_ID properly parsed as integer
@@ -968,7 +979,7 @@ class GitHubMonitor:
         latest_update = self.github.get_latest_repo_update()
         last_check = load_last_check_date()
 
-        if latest_update and last_check and latest_update <= last_check:
+        if not self.force_send and latest_update and last_check and latest_update <= last_check:
             print(f"Новых релизов не найдено. Последнее обновление: {latest_update}")
             print("Мониторинг не требуется. Выход.")
             return
@@ -1052,7 +1063,7 @@ class GitHubMonitor:
             if result["include_in_report"]:
                 repos_data.append(result["info"])
 
-        if not has_real_changes:
+        if not self.force_send and not has_real_changes:
             print()
             print("Реальных изменений в содержимом не найдено.")
             print("Мониторинг не требуется. Выход.")
@@ -1085,10 +1096,9 @@ class GitHubMonitor:
             return
 
         # Дедупликация: пропускаем если контент не изменился
-        import hashlib as _hashlib
-        msg_hash = _hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
+        msg_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
         last_hash = load_last_message_hash()
-        if last_hash and last_hash == msg_hash:
+        if not self.force_send and last_hash and last_hash == msg_hash:
             print()
             print(f"Сообщение не изменилось (hash={msg_hash}). Пропускаем отправку.")
             save_all_repository_states(self.username, all_states)

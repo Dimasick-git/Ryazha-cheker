@@ -117,6 +117,9 @@ jobs:
           TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
           G_USERNAME:           ${{ secrets.G_USERNAME }}
+          TELEGRAM_TOPIC_ID:    ${{ secrets.TELEGRAM_TOPIC_ID }}
+          SKIP_REPOS:           ${{ vars.SKIP_REPOS }}
+          FORCE_SEND:           ${{ vars.FORCE_SEND }}
           PYTHONUNBUFFERED:     "1"
           PYTHONFAULTHANDLER:   "1"
         run: |
