@@ -755,7 +755,7 @@ class GitHubMonitor:
         self.telegram = TelegramClient(
             telegram_token or "dry_run_placeholder",
             self.chat_id or "0",
-            topic_id=int(os.getenv("TELEGRAM_TOPIC_ID", "0")) or None
+            topic_id=int(os.getenv("TELEGRAM_TOPIC_ID") or "0") or None
         )
 
     def _collect_repo_data(self, repo: Dict, old_state: Dict) -> Dict[str, Any]:
