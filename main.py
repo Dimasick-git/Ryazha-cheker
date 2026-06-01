@@ -96,28 +96,27 @@ def truncate(text: str, max_len: int = 60) -> str:
     return text if len(text) <= max_len else text[: max_len - 1] + "…"
 
 
-def load_last_check_date() -> Optional[str]:
-    """Загружает дату последней проверки из JSON файла (raw ISO string)."""
+def _load_check_state() -> Dict[str, Any]:
+    """Читает last_check.json один раз и возвращает валидированный dict."""
     try:
         if os.path.exists('last_check.json'):
             with open('last_check.json', 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                return data.get('last_check_date')
-        return None
+            if isinstance(data, dict):
+                return data
     except Exception as e:
-        print(f'Ошибка загрузки даты последней проверки: {e}')
-        return None
+        print(f'Ошибка чтения last_check.json: {e}')
+    return {}
+
+
+def load_last_check_date() -> Optional[str]:
+    """Загружает дату последней проверки из JSON файла (raw ISO string)."""
+    return _load_check_state().get('last_check_date')
 
 
 def load_last_message_hash() -> Optional[str]:
     """Загружает хэш последнего отправленного сообщения (дедупликация)."""
-    try:
-        if os.path.exists('last_check.json'):
-            with open('last_check.json', 'r', encoding='utf-8') as f:
-                return json.load(f).get('last_message_hash')
-    except Exception:
-        pass
-    return None
+    return _load_check_state().get('last_message_hash')
 
 
 def save_last_message_hash(h: str) -> None:
@@ -173,7 +172,12 @@ def load_all_repository_states(username: str) -> Dict[str, Any]:
         state_file = f"repo_states_{username}.json"
         if os.path.exists(state_file):
             with open(state_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+            if not isinstance(data, dict):
+                print(f"WARN repo_states_{username}.json: ожидался dict, получен {type(data).__name__}. Сброс состояния.")
+                return {}
+            # Отбрасываем записи с некорректным типом — защита от частичной записи
+            return {k: v for k, v in data.items() if isinstance(v, dict)}
         return {}
     except Exception as e:
         print(f'Ошибка загрузки состояний репозиториев: {e}')
