@@ -119,17 +119,19 @@ def load_last_message_hash() -> Optional[str]:
     return _load_check_state().get('last_message_hash')
 
 
-def save_last_message_hash(h: str) -> None:
-    """Обновляет хэш последнего отправленного сообщения."""
+def _update_check_state(**updates: Any) -> None:
+    """Обновляет одно или несколько полей last_check.json за один атомарный write."""
     try:
-        data: Dict[str, Any] = {}
-        if os.path.exists('last_check.json'):
-            with open('last_check.json', 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        data['last_message_hash'] = h
+        data = _load_check_state()
+        data.update(updates)
         _atomic_json_write('last_check.json', data)
     except Exception as e:
-        print(f'Ошибка сохранения хэша сообщения: {e}')
+        print(f'Ошибка обновления last_check.json: {e}')
+
+
+def save_last_message_hash(h: str) -> None:
+    """Обновляет хэш последнего отправленного сообщения."""
+    _update_check_state(last_message_hash=h)
 
 
 def _atomic_json_write(path: str, data: Any) -> None:
@@ -154,16 +156,8 @@ def _atomic_json_write(path: str, data: Any) -> None:
 
 def save_last_check_date(date_str: str) -> None:
     """Сохраняет дату последней проверки в JSON файл (raw ISO string)."""
-    try:
-        data: Dict[str, Any] = {}
-        if os.path.exists('last_check.json'):
-            with open('last_check.json', 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        data['last_check_date'] = date_str
-        _atomic_json_write('last_check.json', data)
-        print(f'Дата последней проверки обновлена: {date_str}')
-    except Exception as e:
-        print(f'Ошибка сохранения даты последней проверки: {e}')
+    _update_check_state(last_check_date=date_str)
+    print(f'Дата последней проверки обновлена: {date_str}')
 
 
 def load_all_repository_states(username: str) -> Dict[str, Any]:
@@ -1140,9 +1134,13 @@ class GitHubMonitor:
             # Если сохранить раньше и Telegram упадёт — следующий запуск
             # не найдёт изменений (SHA уже в known_shas) и пропустит уведомление.
             save_all_repository_states(self.username, all_states)
+            # Единый атомарный write вместо двух последовательных
+            updates: Dict[str, Any] = {'last_message_hash': msg_hash}
             if latest_update:
-                save_last_check_date(latest_update)
-            save_last_message_hash(msg_hash)
+                updates['last_check_date'] = latest_update
+            _update_check_state(**updates)
+            if latest_update:
+                print(f'Дата последней проверки обновлена: {latest_update}')
         else:
             print("Мониторинг завершен с ошибками отправки")
             self.telegram.send(
