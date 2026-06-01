@@ -136,12 +136,21 @@ def save_last_message_hash(h: str) -> None:
 def _atomic_json_write(path: str, data: Any) -> None:
     """Пишет JSON атомарно через временный файл (защита от обрыва записи)."""
     dir_name = os.path.dirname(os.path.abspath(path)) or '.'
-    with tempfile.NamedTemporaryFile(
-        mode='w', encoding='utf-8', dir=dir_name, delete=False, suffix='.tmp'
-    ) as tmp:
-        json.dump(data, tmp, ensure_ascii=False, indent=2)
-        tmp_path = tmp.name
-    os.replace(tmp_path, path)  # atomic on POSIX
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode='w', encoding='utf-8', dir=dir_name, delete=False, suffix='.tmp'
+        ) as tmp:
+            json.dump(data, tmp, ensure_ascii=False, indent=2)
+            tmp_path = tmp.name
+        os.replace(tmp_path, path)  # atomic on POSIX
+    except Exception:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
 
 
 def save_last_check_date(date_str: str) -> None:
