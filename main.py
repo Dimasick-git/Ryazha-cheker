@@ -30,13 +30,21 @@ TELEGRAM_MAX_LENGTH = 4096
 GITHUB_API         = "https://api.github.com"
 TELEGRAM_API       = "https://api.telegram.org"
 
-# Сколько репо/коммитов показывать
-MAX_COMMITS        = 5
-MAX_PRS            = 3
-MAX_RELEASES       = 1  # Только latest релиз
-MAX_WORKFLOWS      = 3
+# Сколько репо/коммитов показывать (переопределяются через env vars)
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (ValueError, TypeError):
+        return default
+
+MAX_COMMITS   = _int_env("MAX_COMMITS",   5)
+MAX_PRS       = _int_env("MAX_PRS",       3)
+MAX_RELEASES  = _int_env("MAX_RELEASES",  1)
+MAX_WORKFLOWS = _int_env("MAX_WORKFLOWS", 3)
 # Задержка между запросами к GitHub API (rate limit protection)
-API_DELAY          = 0.5   # секунд
+API_DELAY     = float(os.environ.get("API_DELAY", "0.5"))
+# Сколько SHA хранить на репозиторий (защита от дублей при паузах >N коммитов)
+MAX_KNOWN_SHAS = _int_env("MAX_KNOWN_SHAS", 500)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -881,7 +889,7 @@ class GitHubMonitor:
         updated_run_ids = list(set(known_run_ids) | set(all_current_run_ids))
 
         new_state = {
-            "known_shas":       updated_shas[-100:],
+            "known_shas":       updated_shas[-MAX_KNOWN_SHAS:],
             "known_pr_numbers": updated_pr_numbers[-200:],
             "known_run_ids":    updated_run_ids[-200:],
             "last_check":       datetime.now(timezone.utc).isoformat(),
@@ -1143,12 +1151,15 @@ class GitHubMonitor:
                 print(f'Дата последней проверки обновлена: {latest_update}')
         else:
             print("Мониторинг завершен с ошибками отправки")
-            self.telegram.send(
-                "<b>GitHub Monitor</b>\n"
-                "Отчет сформирован, но некоторые части не отправлены.\n"
-                "Проверьте логи Actions для деталей."
-            )
-            sys.exit(1)
+            # Сохраняем состояние даже при частичной неудаче, чтобы не
+            # дублировать уже отправленные части при следующем запуске.
+            save_all_repository_states(self.username, all_states)
+            if latest_update:
+                save_last_check_date(latest_update)
+            # Выходим с ненулевым кодом чтобы GitHub Actions пометил
+            # шаг как failed, но не роняем весь workflow через sys.exit(1)
+            # с исключением — это уже делает блок в entry point.
+            sys.exit(2)
 
 
 # ──────────────────────────────────────────────────────────────
