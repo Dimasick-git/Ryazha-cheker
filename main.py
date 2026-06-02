@@ -24,6 +24,15 @@ import requests
 
 
 # ──────────────────────────────────────────────────────────────
+# COLD-START FLAG
+# ──────────────────────────────────────────────────────────────
+# Устанавливается в True если файл состояния отсутствует или пуст
+# (первый запуск / истёкший кэш GitHub Actions).
+# В этом случае текущее состояние записывается как базовая линия
+# без отправки уведомлений — защита от флуда сообщениями.
+IS_COLD_START: bool = False
+
+# ──────────────────────────────────────────────────────────────
 # CONSTANTS
 # ──────────────────────────────────────────────────────────────
 TELEGRAM_MAX_LENGTH = 4096
@@ -169,7 +178,12 @@ def save_last_check_date(date_str: str) -> None:
 
 
 def load_all_repository_states(username: str) -> Dict[str, Any]:
-    """Загружает все состояния репозиториев из файла одним чтением."""
+    """Загружает все состояния репозиториев из файла одним чтением.
+
+    Если файл отсутствует или пуст — устанавливает глобальный флаг IS_COLD_START,
+    чтобы первый запуск (или запуск после истечения кэша) не вызывал флуд уведомлений.
+    """
+    global IS_COLD_START
     try:
         state_file = f"repo_states_{username}.json"
         if os.path.exists(state_file):
@@ -177,12 +191,19 @@ def load_all_repository_states(username: str) -> Dict[str, Any]:
                 data = json.load(f)
             if not isinstance(data, dict):
                 print(f"WARN repo_states_{username}.json: ожидался dict, получен {type(data).__name__}. Сброс состояния.")
+                IS_COLD_START = True
                 return {}
-            # Отбрасываем записи с некорректным типом — защита от частичной записи
-            return {k: v for k, v in data.items() if isinstance(v, dict)}
+            valid = {k: v for k, v in data.items() if isinstance(v, dict)}
+            if not valid:
+                # Файл существует, но не содержит валидных данных
+                IS_COLD_START = True
+            return valid
+        # Файл отсутствует — первый запуск или сброс кэша
+        IS_COLD_START = True
         return {}
     except Exception as e:
         print(f'Ошибка загрузки состояний репозиториев: {e}')
+        IS_COLD_START = True
         return {}
 
 
@@ -991,6 +1012,11 @@ class GitHubMonitor:
             self._run_summary()
             return
 
+        # Загружаем состояния ДО проверки обновлений, чтобы IS_COLD_START
+        # был установлен правильно перед любыми обращениями к нему.
+        # Сохраняем заранее загруженный dict, чтобы не читать файл дважды.
+        _pre_loaded_states = load_all_repository_states(self.username)
+
         # Быстрая проверка — были ли вообще обновления
         print("Проверка новых релизов...")
         # Fix #2: get_latest_repo_update returns raw ISO string; compare ISO strings directly
@@ -1039,8 +1065,8 @@ class GitHubMonitor:
         print()
         print("Сбор информации о репозиториях...")
 
-        # Загружаем все состояния одним чтением файла
-        all_states = load_all_repository_states(self.username)
+        # Используем уже загруженные состояния (IS_COLD_START уже выставлен)
+        all_states = _pre_loaded_states
 
         repos_data = []
         has_real_changes = False
@@ -1087,6 +1113,24 @@ class GitHubMonitor:
 
             if result["include_in_report"]:
                 repos_data.append(result["info"])
+
+        # ── Холодный старт: записываем базовую линию без уведомлений ──
+        if IS_COLD_START:
+            print()
+            print("COLD START: файл состояния отсутствовал или был пуст.")
+            print("Записываем текущее состояние как базовую линию без отправки уведомлений.")
+            save_all_repository_states(self.username, all_states)
+            if latest_update:
+                save_last_check_date(latest_update)
+            cold_msg = (
+                "🔄 <b>Монитор запущен (первый запуск или сброс кэша).</b>\n\n"
+                "Текущее состояние записано, следующие изменения придут в уведомления."
+            )
+            if self.dry_run:
+                print("DRY-RUN cold-start message:", cold_msg)
+            else:
+                self.telegram.send(cold_msg)
+            return
 
         if not self.force_send and not has_real_changes:
             print()
@@ -1166,9 +1210,10 @@ class GitHubMonitor:
 # ENTRY POINT
 # ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    _monitor_ref: Optional["GitHubMonitor"] = None
     try:
-        monitor = GitHubMonitor()
-        monitor.run()
+        _monitor_ref = GitHubMonitor()
+        _monitor_ref.run()
     except KeyboardInterrupt:
         print("\n⏹  Interrupted")
         sys.exit(0)
@@ -1176,6 +1221,33 @@ if __name__ == "__main__":
         raise
     except Exception as e:
         import traceback
-        print(f"\n Unexpected error: {e}")
+        print(f"\nUnexpected error: {e}")
         traceback.print_exc()
-        sys.exit(1)
+
+        # Уведомляем в Telegram об аварийном завершении скрипта
+        _tg_token  = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        _tg_chat   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+        if _tg_token and _tg_chat and _monitor_ref is not None:
+            try:
+                error_msg = (
+                    f"🚨 <b>Ryazha-cheker упал!</b>\n\n"
+                    f"<code>{escape_html(type(e).__name__)}: "
+                    f"{escape_html(str(e)[:500])}</code>"
+                )
+                _monitor_ref.telegram.send(error_msg)
+            except Exception as notify_err:
+                print(f"ERR crash-notify: {notify_err}")
+        elif _tg_token and _tg_chat:
+            # monitor не успел инициализироваться — создаём минимальный клиент
+            try:
+                _tmp_tg = TelegramClient(_tg_token, _tg_chat)
+                error_msg = (
+                    f"🚨 <b>Ryazha-cheker упал!</b>\n\n"
+                    f"<code>{escape_html(type(e).__name__)}: "
+                    f"{escape_html(str(e)[:500])}</code>"
+                )
+                _tmp_tg.send(error_msg)
+            except Exception as notify_err:
+                print(f"ERR crash-notify: {notify_err}")
+
+        raise  # re-raise: GitHub Actions пометит job как failed
