@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Тесты для проверки форматирования сообщений Telegram и логики памяти."""
 
-from main import MessageBuilder, build_github_file_url, html_code_block
+from checker.formatter import MessageBuilder, build_github_file_url, html_code_block
 
 
 def тест_блок_кода_использует_тег_pre():
@@ -145,7 +145,7 @@ def тест_построитель_сообщений_экранирует_html
 
 def тест_telegram_client_разбивает_длинное_сообщение():
     """TelegramClient._split должен разбивать сообщения длиннее 4096 символов."""
-    from main import TelegramClient
+    from checker.telegram_client import TelegramClient
     client = TelegramClient("dummy_token", "dummy_chat")
     long_text = "A" * 5000
     parts = client._split(long_text)
