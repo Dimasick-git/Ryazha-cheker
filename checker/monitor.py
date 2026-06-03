@@ -238,7 +238,7 @@ class GitHubMonitor:
             if not any(fnmatch.fnmatch(r["name"], p) for p in self.skip_patterns)
         ]
 
-        all_states = load_all_repository_states(self.username)
+        all_states, _ = load_all_repository_states(self.username)
         total_stars  = sum(r.get("stargazers_count", 0) for r in repositories)
         total_forks  = sum(r.get("forks_count", 0)     for r in repositories)
         total_issues = sum(r.get("open_issues_count", 0) for r in repositories)

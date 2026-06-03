@@ -76,7 +76,6 @@ def save_last_message_hash(h: str) -> None:
 def save_last_check_date(date_str: str) -> None:
     """Save the last-check date to the JSON state file (raw ISO string)."""
     _update_check_state(last_check_date=date_str)
-    print(f"Last check date updated: {date_str}")
 
 
 # ──────────────────────────────────────────────────────────────
