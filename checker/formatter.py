@@ -105,22 +105,29 @@ class MessageBuilder:
             "",
         ]
 
-        changed_repos = [r for r in repos_data if r.get("recent_commits")][:5]
+        # Include all repos with any change (commits, releases, stars, milestones, PRs),
+        # not only those with commits — repos with a new release or star milestone
+        # but zero commits would otherwise be silently dropped.
+        active_repos = repos_data[:5]
 
-        if not changed_repos:
+        if not active_repos:
             return "<i>status: idle. no changes detected.</i>", None
 
-        total_commits = sum(len(r.get("recent_commits", [])) for r in changed_repos)
-        total_prs = sum(len(r.get("open_prs", [])) for r in repos_data)
-        total_issues = sum(r.get("open_issues", 0) for r in repos_data)
-        lines.append(
-            f"<i>repos=<b>{len(changed_repos)}</b> "
-            f"commits=<b>{total_commits}</b> "
-            f"prs=<b>{total_prs}</b> "
-            f"issues=<b>{total_issues}</b></i>\n"
-        )
+        total_commits  = sum(len(r.get("recent_commits", [])) for r in active_repos)
+        total_releases = sum(len(r.get("releases", []))       for r in active_repos)
+        total_prs      = sum(len(r.get("open_prs", []))       for r in active_repos)
+        total_issues   = sum(r.get("open_issues", 0)          for r in active_repos)
 
-        for repo in changed_repos:
+        summary_parts = [f"repos=<b>{len(active_repos)}</b>", f"commits=<b>{total_commits}</b>"]
+        if total_releases:
+            summary_parts.append(f"releases=<b>{total_releases}</b>")
+        if total_prs:
+            summary_parts.append(f"prs=<b>{total_prs}</b>")
+        if total_issues:
+            summary_parts.append(f"issues=<b>{total_issues}</b>")
+        lines.append(f"<i>{' · '.join(summary_parts)}</i>\n")
+
+        for repo in active_repos:
             name = escape_html(repo["name"])
             lang = escape_html(repo.get("language") or "Unknown")
             stars = repo.get("stars", 0)
@@ -192,10 +199,16 @@ class MessageBuilder:
             releases = repo.get("releases", [])
             if releases:
                 r = releases[0]
-                tag = escape_html(r["tag"])
-                rname = escape_html(r["name"])
-                rurl = escape_html(r["html_url"])
-                lines.append(f"<b>RELEASE:</b> <a href=\"{rurl}\">{tag}</a> — {rname}")
+                tag    = escape_html(r["tag"])
+                rname  = escape_html(r["name"])
+                rurl   = escape_html(r["html_url"])
+                author = escape_html(r.get("author", ""))
+                date   = fmt_date(r.get("published_at", ""))
+                author_str = f" by {author}" if author and author != "Unknown" else ""
+                lines.append(
+                    f"🚀 <b>RELEASE:</b> <a href=\"{rurl}\">{tag}</a> — {rname}"
+                    f"<i>{author_str} · {date}</i>"
+                )
 
             # PRs
             prs = repo.get("open_prs", [])
