@@ -23,6 +23,47 @@ WORKFLOW_ICONS: Dict[Optional[str], str] = {
 # Star counts that trigger a milestone notification
 STAR_MILESTONES = {5, 10, 25, 50, 100, 250, 500, 1000}
 
+# ──────────────────────────────────────────────────────────────
+# LANGUAGE ICONS
+# ──────────────────────────────────────────────────────────────
+LANGUAGE_ICONS: Dict[str, str] = {
+    "Python":      "🐍",
+    "JavaScript":  "🟨",
+    "TypeScript":  "🔷",
+    "C":           "🔵",
+    "C++":         "⚙️",
+    "C#":          "🟣",
+    "Java":        "☕",
+    "Go":          "🐹",
+    "Rust":        "🦀",
+    "Ruby":        "💎",
+    "PHP":         "🐘",
+    "Swift":       "🍎",
+    "Kotlin":      "🎯",
+    "HTML":        "🌐",
+    "CSS":         "🎨",
+    "Shell":       "🐚",
+    "Dockerfile":  "🐋",
+    "Lua":         "🌙",
+    "R":           "📊",
+    "Scala":       "♾️",
+    "Haskell":     "λ",
+    "Elixir":      "💧",
+    "Dart":        "🎯",
+    "MATLAB":      "🔢",
+    "Assembly":    "⚡",
+    "Makefile":    "🔧",
+    "CMake":       "🔧",
+    "Nix":         "❄️",
+    "Vim script":  "📝",
+    "Unknown":     "❓",
+}
+
+
+def language_icon(lang: Optional[str]) -> str:
+    """Return the emoji icon for a programming language."""
+    return LANGUAGE_ICONS.get(lang or "Unknown", "📁")
+
 
 def workflow_icon(conclusion: Optional[str], status: str) -> str:
     """Return the appropriate emoji for a workflow run."""
@@ -220,3 +261,157 @@ class MessageBuilder:
 
         reply_markup = {"inline_keyboard": buttons} if buttons else None
         return "\n".join(lines), reply_markup
+
+    @staticmethod
+    def build_trending(username: str, repos: List[Dict], all_states: Dict) -> str:
+        """Build a Trending Report message (top-10 repos by activity score).
+
+        ``repos`` must already be sorted by activity score (descending) and
+        contain the raw GitHub repo dicts.  ``all_states`` is the persisted
+        state dict used to compute star deltas.
+        """
+        now = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+        lines = [
+            f"<b>TRENDING REPORT</b> [<code>{escape_html(username)}</code>] · <i>{now}</i>",
+            "",
+            "<i>Top 10 repositories by activity (stars + pushes + issues)</i>",
+            "",
+        ]
+
+        for i, r in enumerate(repos[:10], 1):
+            name      = r["name"]
+            rname     = escape_html(name)
+            stars     = r.get("stargazers_count", 0)
+            issues    = r.get("open_issues_count", 0)
+            lang      = r.get("language") or "Unknown"
+            lang_icon = language_icon(lang)
+            pushed    = (r.get("pushed_at") or "")[:10]
+            url       = f"https://github.com/{username}/{name}"
+
+            old_stars = all_states.get(name, {}).get("stars", stars)
+            delta     = stars - old_stars
+            delta_str = f" <b>(+{delta})</b>" if delta > 0 else ""
+
+            lines.append(
+                f"<b>{i}.</b> <a href=\"{url}\">{rname}</a>\n"
+                f"   ★ {stars}{delta_str} · {lang_icon} {escape_html(lang)}"
+                f" · 📅 {pushed} · 🐛 {issues}"
+            )
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def build_weekly(username: str, repos: List[Dict], all_states: Dict) -> str:
+        """Build a comprehensive Weekly Digest message.
+
+        ``repos`` is the full raw list of GitHub repo dicts.
+        ``all_states`` is the persisted state dict.
+        """
+        from datetime import timedelta
+
+        now = datetime.now(timezone.utc)
+        now_str = now.strftime("%d.%m.%Y %H:%M UTC")
+        week_ago = now - timedelta(days=7)
+
+        total_repos  = len(repos)
+        total_stars  = sum(r.get("stargazers_count", 0) for r in repos)
+        total_forks  = sum(r.get("forks_count", 0)      for r in repos)
+        total_issues = sum(r.get("open_issues_count", 0) for r in repos)
+
+        lines = [
+            f"<b>WEEKLY DIGEST</b> [<code>{escape_html(username)}</code>] · <i>{now_str}</i>",
+            "",
+            "<b>Overall stats</b>",
+            (
+                f"  Repos: <b>{total_repos}</b> · "
+                f"Stars: <b>{total_stars}</b> · "
+                f"Forks: <b>{total_forks}</b> · "
+                f"Issues: <b>{total_issues}</b>"
+            ),
+            "",
+        ]
+
+        # ── Top 5 most active (by pushed_at) ──────────────────────
+        lines.append("<b>Top 5 most active this week</b>")
+        most_active = sorted(repos, key=lambda r: r.get("pushed_at") or "", reverse=True)[:5]
+        for i, r in enumerate(most_active, 1):
+            name      = r["name"]
+            rname     = escape_html(name)
+            pushed    = fmt_date(r.get("pushed_at") or "")
+            lang      = r.get("language") or "Unknown"
+            lang_icon = language_icon(lang)
+            url       = f"https://github.com/{username}/{name}"
+            lines.append(f"  {i}. <a href=\"{url}\">{rname}</a> — {lang_icon} · 📅 {pushed}")
+
+        lines.append("")
+
+        # ── Top 5 by stars ────────────────────────────────────────
+        lines.append("<b>Top 5 by stars</b>")
+        top_stars = sorted(repos, key=lambda r: r.get("stargazers_count", 0), reverse=True)[:5]
+        for i, r in enumerate(top_stars, 1):
+            name      = r["name"]
+            rname     = escape_html(name)
+            stars     = r.get("stargazers_count", 0)
+            lang      = r.get("language") or "Unknown"
+            lang_icon = language_icon(lang)
+            url       = f"https://github.com/{username}/{name}"
+
+            old_stars = all_states.get(name, {}).get("stars", stars)
+            delta     = stars - old_stars
+            delta_str = f" <b>(+{delta})</b>" if delta > 0 else ""
+
+            lines.append(
+                f"  {i}. <a href=\"{url}\">{rname}</a> — ★ {stars}{delta_str} · {lang_icon}"
+            )
+
+        lines.append("")
+
+        # ── Repos that crossed a star milestone ───────────────────
+        milestone_repos = []
+        for r in repos:
+            name      = r["name"]
+            stars     = r.get("stargazers_count", 0)
+            old_stars = all_states.get(name, {}).get("stars", stars)
+            crossed   = sorted(m for m in STAR_MILESTONES if old_stars < m <= stars)
+            if crossed:
+                milestone_repos.append((r, crossed))
+
+        if milestone_repos:
+            lines.append("<b>Star milestones reached</b>")
+            for r, milestones in milestone_repos:
+                name  = r["name"]
+                rname = escape_html(name)
+                url   = f"https://github.com/{username}/{name}"
+                ms_str = ", ".join(str(m) for m in milestones)
+                lines.append(f"  🌟 <a href=\"{url}\">{rname}</a> — <b>{ms_str}</b> stars!")
+            lines.append("")
+
+        # ── New repos this week (created_at within last 7 days) ───
+        new_repos = []
+        for r in repos:
+            created_raw = r.get("created_at") or ""
+            if not created_raw:
+                continue
+            try:
+                created_dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                if created_dt >= week_ago.replace(tzinfo=timezone.utc):
+                    new_repos.append(r)
+            except Exception:
+                continue
+
+        if new_repos:
+            lines.append("<b>New this week</b>")
+            for r in new_repos:
+                name      = r["name"]
+                rname     = escape_html(name)
+                lang      = r.get("language") or "Unknown"
+                lang_icon = language_icon(lang)
+                created   = (r.get("created_at") or "")[:10]
+                url       = f"https://github.com/{username}/{name}"
+                lines.append(
+                    f"  + <a href=\"{url}\">{rname}</a> — {lang_icon} · created {created}"
+                )
+            lines.append("")
+
+        lines.append(f"<i>Generated {now_str}</i>")
+        return "\n".join(lines)

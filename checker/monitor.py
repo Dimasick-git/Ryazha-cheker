@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from .formatter import escape_html, MessageBuilder
+from .formatter import escape_html, language_icon, MessageBuilder
 from .github_client import (
     GitHubClient,
     API_DELAY,
@@ -55,6 +55,14 @@ class GitHubMonitor:
         self.summary_mode = (
             "--summary" in sys.argv
             or os.getenv("SUMMARY_MODE", "").lower() in ("1", "true")
+        )
+        self.trending_mode = (
+            "--trending" in sys.argv
+            or os.getenv("TRENDING_MODE", "").lower() in ("1", "true")
+        )
+        self.weekly_mode = (
+            "--weekly" in sys.argv
+            or os.getenv("WEEKLY_MODE", "").lower() in ("1", "true")
         )
 
         missing = []
@@ -303,6 +311,107 @@ class GitHubMonitor:
         save_all_repository_states(self.username, all_states)
         print("Digest sent.")
 
+    def _run_trending(self) -> None:
+        """--trending mode: top-10 repos ranked by activity score."""
+        print("TRENDING MODE: building trending report...")
+        repositories = self.github.get_repositories()
+        if not repositories:
+            print("No repositories found.")
+            return
+
+        repositories = [
+            r for r in repositories
+            if not any(fnmatch.fnmatch(r["name"], p) for p in self.skip_patterns)
+        ]
+
+        all_states, _ = load_all_repository_states(self.username)
+
+        def _activity_score(r: Dict) -> float:
+            """Higher score = more active / trending.
+
+            Score components:
+            - stars      (weighted x1)
+            - push recency bonus: repos pushed within the last 7 days get +200,
+              within 30 days +100
+            - open issues (weighted x0.5 — signals community engagement)
+            """
+            stars  = r.get("stargazers_count", 0)
+            issues = r.get("open_issues_count", 0)
+            pushed = r.get("pushed_at") or ""
+
+            push_bonus = 0.0
+            if pushed:
+                try:
+                    dt = datetime.fromisoformat(pushed.replace("Z", "+00:00"))
+                    age_days = (datetime.now(timezone.utc) - dt).days
+                    if age_days <= 7:
+                        push_bonus = 200.0
+                    elif age_days <= 30:
+                        push_bonus = 100.0
+                except Exception:
+                    pass
+
+            return stars + push_bonus + issues * 0.5
+
+        ranked = sorted(repositories, key=_activity_score, reverse=True)
+        message = MessageBuilder.build_trending(self.username, ranked, all_states)
+        print(f"Trending message length: {len(message)} chars")
+
+        if self.dry_run:
+            print(re.sub(r"<[^>]+>", "", message))
+            return
+
+        if not self.telegram.validate():
+            print("Invalid Telegram token. Exiting.")
+            sys.exit(1)
+
+        self.telegram.send(message)
+        # Update star baseline after sending
+        for r in repositories:
+            rname = r["name"]
+            if rname not in all_states:
+                all_states[rname] = {}
+            all_states[rname]["stars"] = r.get("stargazers_count", 0)
+            all_states[rname]["forks"] = r.get("forks_count", 0)
+        save_all_repository_states(self.username, all_states)
+        print("Trending report sent.")
+
+    def _run_weekly(self) -> None:
+        """--weekly mode: comprehensive weekly digest."""
+        print("WEEKLY MODE: building weekly digest...")
+        repositories = self.github.get_repositories()
+        if not repositories:
+            print("No repositories found.")
+            return
+
+        repositories = [
+            r for r in repositories
+            if not any(fnmatch.fnmatch(r["name"], p) for p in self.skip_patterns)
+        ]
+
+        all_states, _ = load_all_repository_states(self.username)
+        message = MessageBuilder.build_weekly(self.username, repositories, all_states)
+        print(f"Weekly digest length: {len(message)} chars")
+
+        if self.dry_run:
+            print(re.sub(r"<[^>]+>", "", message))
+            return
+
+        if not self.telegram.validate():
+            print("Invalid Telegram token. Exiting.")
+            sys.exit(1)
+
+        self.telegram.send(message)
+        # Update star baseline after sending
+        for r in repositories:
+            rname = r["name"]
+            if rname not in all_states:
+                all_states[rname] = {}
+            all_states[rname]["stars"] = r.get("stargazers_count", 0)
+            all_states[rname]["forks"] = r.get("forks_count", 0)
+        save_all_repository_states(self.username, all_states)
+        print("Weekly digest sent.")
+
     def run(self) -> None:
         """Main entry point: load state, collect data, format and send."""
         print(f"Starting GitHub monitor for: {self.username}")
@@ -313,6 +422,14 @@ class GitHubMonitor:
 
         if self.summary_mode:
             self._run_summary()
+            return
+
+        if self.trending_mode:
+            self._run_trending()
+            return
+
+        if self.weekly_mode:
+            self._run_weekly()
             return
 
         # Load state BEFORE checking for updates so is_cold_start is set correctly.
