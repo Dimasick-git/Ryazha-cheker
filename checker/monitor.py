@@ -21,7 +21,6 @@ from .github_client import (
     MAX_KNOWN_SHAS,
 )
 from .state import (
-    IS_COLD_START,
     load_all_repository_states,
     save_all_repository_states,
     load_last_check_date,
@@ -93,8 +92,6 @@ class GitHubMonitor:
 
         Designed to be called concurrently via ThreadPoolExecutor.
         """
-        import checker.state as _state_mod
-
         name = repo["name"]
 
         # Base data from the repo list
@@ -318,13 +315,8 @@ class GitHubMonitor:
             self._run_summary()
             return
 
-        # Load state BEFORE checking for updates so IS_COLD_START is set correctly
-        # before any code inspects it.
-        _pre_loaded_states = load_all_repository_states(self.username)
-
-        # Re-read the module-level flag (it may have been updated by the call above)
-        import checker.state as _state_mod
-        is_cold_start = _state_mod.IS_COLD_START
+        # Load state BEFORE checking for updates so is_cold_start is set correctly.
+        _pre_loaded_states, is_cold_start = load_all_repository_states(self.username)
 
         # Quick check: were there any updates at all?
         print("Checking for new updates...")

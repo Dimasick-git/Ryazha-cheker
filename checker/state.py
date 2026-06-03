@@ -3,13 +3,8 @@
 import json
 import os
 import tempfile
-from typing import Any, Dict, Optional
-
-
-# Set to True when the state file is missing or empty (first run / expired cache).
-# In that case the current state is recorded as a baseline without sending
-# notifications — protection against notification floods.
-IS_COLD_START: bool = False
+import time
+from typing import Any, Dict, Optional, Tuple
 
 
 # ──────────────────────────────────────────────────────────────
@@ -88,45 +83,38 @@ def save_last_check_date(date_str: str) -> None:
 # REPOSITORY STATES  (repo_states_<username>.json)
 # ──────────────────────────────────────────────────────────────
 
-def load_all_repository_states(username: str) -> Dict[str, Any]:
+def load_all_repository_states(username: str) -> Tuple[Dict[str, Any], bool]:
     """Load all repository states from file in a single read.
 
-    If the file is missing or empty, sets the global IS_COLD_START flag so the
-    first run (or a run after cache expiry) does not flood with notifications.
-    Also logs the index rebuild time for diagnostics.
+    Returns ``(states, is_cold_start)``.  ``is_cold_start`` is True when the
+    state file is missing or empty — the caller should record the current state
+    as a baseline without sending notifications to avoid flooding.
     """
-    global IS_COLD_START
-    import time as _time
-    t0 = _time.monotonic()
+    t0 = time.monotonic()
     try:
         state_file = f"repo_states_{username}.json"
         if os.path.exists(state_file):
             with open(state_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            elapsed_ms = (_time.monotonic() - t0) * 1000
+            elapsed_ms = (time.monotonic() - t0) * 1000
             if not isinstance(data, dict):
                 print(
                     f"WARN repo_states_{username}.json: expected dict, "
                     f"got {type(data).__name__}. Resetting state."
                 )
-                IS_COLD_START = True
-                return {}
+                return {}, True
             valid = {k: v for k, v in data.items() if isinstance(v, dict)}
             print(
                 f"State index loaded: {len(valid)} repos in {elapsed_ms:.1f} ms "
                 f"(from {state_file})"
             )
             if not valid:
-                # File exists but contains no valid entries
-                IS_COLD_START = True
-            return valid
-        # File missing — first run or cache reset
-        IS_COLD_START = True
-        return {}
+                return {}, True
+            return valid, False
+        return {}, True
     except Exception as e:
         print(f"Error loading repository states: {e}")
-        IS_COLD_START = True
-        return {}
+        return {}, True
 
 
 def save_all_repository_states(username: str, states: Dict[str, Any]) -> None:
