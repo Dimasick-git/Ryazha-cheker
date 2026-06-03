@@ -139,7 +139,7 @@ class GitHubClient:
         if not data or "files" not in data:
             return []
         result = []
-        for f in data["files"][:5]:
+        for f in data["files"][:8]:
             result.append({
                 "filename":  f["filename"],
                 "changes":   f.get("changes", 0),
