@@ -126,7 +126,7 @@ class GitHubMonitor:
             print(f"[{name}] forks +{fork_delta}")
 
         # Milestone: check if we crossed any star threshold this run
-        crossed = [m for m in STAR_MILESTONES if old_stars < m <= info["stars"]]
+        crossed = sorted(m for m in STAR_MILESTONES if old_stars < m <= info["stars"])
         info["star_milestones"] = crossed
         for m in crossed:
             print(f"[{name}] MILESTONE: {m} stars!")

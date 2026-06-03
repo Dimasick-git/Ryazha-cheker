@@ -174,7 +174,7 @@ class GitHubClient:
                 continue
         return result
 
-    def get_releases(self, repo: str, count: int = 1) -> List[Dict]:
+    def get_releases(self, repo: str) -> List[Dict]:
         """Latest release for a repository."""
         data = self._get(
             f"{GITHUB_API}/repos/{self.username}/{repo}/releases/latest",
