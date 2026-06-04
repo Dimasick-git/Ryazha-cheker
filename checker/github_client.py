@@ -37,12 +37,22 @@ class GitHubClient:
 
     def __init__(self, token: str, username: str):
         self.username = username
-        self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {token}",
-            "Accept":        "application/vnd.github.v3+json",
-            "User-Agent":    f"GitHubMonitor/{username}",
-        })
+        self._token = token
+        # Use threading.local() so each thread gets its own requests.Session,
+        # avoiding data races when ThreadPoolExecutor calls _get() concurrently.
+        self._local = threading.local()
+
+    def _get_session(self) -> requests.Session:
+        """Return a per-thread Session, creating one the first time in each thread."""
+        if not hasattr(self._local, "session"):
+            session = requests.Session()
+            session.headers.update({
+                "Authorization": f"Bearer {self._token}",
+                "Accept":        "application/vnd.github.v3+json",
+                "User-Agent":    f"GitHubMonitor/{self.username}",
+            })
+            self._local.session = session
+        return self._local.session
 
     def _get(self, url: str, params: dict = None, _retry: int = 3) -> Optional[Any]:
         """GET request with rate-limit handling (exponential backoff) and error recovery."""
@@ -50,7 +60,7 @@ class GitHubClient:
         for attempt in range(1, _retry + 1):
             try:
                 with self._api_semaphore:
-                    resp = self.session.get(url, params=params, timeout=20)
+                    resp = self._get_session().get(url, params=params, timeout=20)
 
                 if resp.status_code == 429 or (
                     resp.status_code == 403
@@ -234,15 +244,34 @@ class GitHubClient:
     def get_open_issues_count(self, repo: str, open_issues_raw: int = -1, pr_count: int = 0) -> int:
         """Open issue count (excluding PRs).
 
-        If open_issues_raw is provided (from an already-fetched repo list), skip
-        an extra API call to save rate limit budget.
+        Uses the Issues API with ?state=open&filter=all to get only real issues
+        (not PRs). The repo-level open_issues_count field includes PRs, and
+        subtracting a capped pr_count (e.g. MAX_PRS=3) gives a wrong result
+        when the repo has more open PRs than that cap — so we avoid that approach.
         """
+        # The Issues API with ?state=open returns both issues and PRs by default,
+        # but we can count only items that lack a "pull_request" key.
+        # To avoid paginating through all issues, we fetch up to 100 and count
+        # the non-PR items. For an accurate total we use the Search API approach:
+        # GET /repos/:owner/:repo/issues?state=open returns issues+PRs, but each
+        # item has a "pull_request" key when it is a PR. We rely on the GitHub
+        # Issues API which, when called without the "pulls" accept header, lets
+        # us pass type=issue via labels workaround. The simplest accurate method
+        # is to query the search API for `repo:owner/repo type:issue state:open`.
+        data = self._get(
+            f"{GITHUB_API}/search/issues",
+            params={"q": f"repo:{self.username}/{repo} type:issue state:open", "per_page": 1},
+        )
+        if data and isinstance(data, dict) and "total_count" in data:
+            return data["total_count"]
+        # Fallback: use the repo's open_issues_count field without subtracting
+        # a capped PR count, since that subtraction is inaccurate when there are
+        # more open PRs than the fetch limit.
         if open_issues_raw >= 0:
-            return max(0, open_issues_raw - pr_count)
-        data = self._get(f"{GITHUB_API}/repos/{self.username}/{repo}")
-        if data and isinstance(data, dict):
-            total = data.get("open_issues_count", 0)
-            return max(0, total - pr_count)
+            return open_issues_raw
+        repo_data = self._get(f"{GITHUB_API}/repos/{self.username}/{repo}")
+        if repo_data and isinstance(repo_data, dict):
+            return repo_data.get("open_issues_count", 0)
         return 0
 
     def get_new_releases(self, repo: str, known_tag: Optional[str]) -> List[Dict]:
