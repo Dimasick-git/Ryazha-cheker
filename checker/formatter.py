@@ -149,7 +149,9 @@ class MessageBuilder:
         # Include all repos with any change (commits, releases, stars, milestones, PRs),
         # not only those with commits — repos with a new release or star milestone
         # but zero commits would otherwise be silently dropped.
-        active_repos = repos_data[:5]
+        import os as _os
+        _limit = max(1, int(_os.environ.get("MAX_DISPLAY_REPOS", "5")))
+        active_repos = repos_data[:_limit]
 
         if not active_repos:
             return "<i>status: idle. no changes detected.</i>", None

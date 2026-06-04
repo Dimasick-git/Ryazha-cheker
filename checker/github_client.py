@@ -56,10 +56,15 @@ class GitHubClient:
                     resp.status_code == 403
                     and "rate limit" in resp.text.lower()
                 ):
-                    reset_ts = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
-                    wait = max(reset_ts - int(time.time()), delay)
-                    # Jitter prevents all threads from retrying simultaneously.
-                    wait += random.uniform(0.5, delay)
+                    # Respect Retry-After header (secondary rate limit) if present,
+                    # otherwise fall back to X-RateLimit-Reset.
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after:
+                        wait = float(retry_after) + random.uniform(0.5, 2.0)
+                    else:
+                        reset_ts = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
+                        wait = max(reset_ts - int(time.time()), delay)
+                        wait += random.uniform(0.5, delay)
                     print(f"WARN rate-limit attempt={attempt}/{_retry} wait={wait:.1f}s")
                     time.sleep(wait)
                     delay *= 2
@@ -67,6 +72,13 @@ class GitHubClient:
 
                 if resp.status_code == 200:
                     return resp.json()
+
+                # Retry on server errors (5xx); give up immediately on client errors (4xx).
+                if resp.status_code >= 500 and attempt < _retry:
+                    print(f"WARN server-error status={resp.status_code} attempt={attempt}/{_retry}, retrying in {delay}s")
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
 
                 print(f"ERR github-api status={resp.status_code} url={url}")
                 print(f"   Ответ: {resp.text[:200]}")
