@@ -191,6 +191,17 @@ class GitHubMonitor:
 
         info["recent_commits"] = new_commits
 
+        # AI commit summary (runs synchronously; graceful degradation if unavailable)
+        if new_commits:
+            try:
+                from .ai_summary import summarize_commits
+                ai_text = summarize_commits(name, new_commits)
+                info["ai_summary"] = ai_text
+            except Exception:
+                info["ai_summary"] = None
+        else:
+            info["ai_summary"] = None
+
         # PRs with deduplication
         prs_raw = self.github.get_open_prs(name, count=MAX_PRS)
         known_pr_numbers = set(old_state.get("known_pr_numbers", []))

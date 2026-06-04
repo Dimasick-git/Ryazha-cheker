@@ -198,6 +198,11 @@ class MessageBuilder:
             for m in milestones:
                 lines.append(f"  🌟 <b>MILESTONE: {m} звёзд!</b>")
 
+            # AI summary (if available)
+            ai_summary = repo.get("ai_summary")
+            if ai_summary:
+                lines.append(f"  💡 <i>{escape_html(ai_summary)}</i>")
+
             # Commits — no sub-heading
             commits = repo.get("recent_commits", [])[:2]
             for c in commits:
