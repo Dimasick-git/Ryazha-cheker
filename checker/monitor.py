@@ -95,6 +95,38 @@ class GitHubMonitor:
             topic_id=int(os.getenv("TELEGRAM_TOPIC_ID") or "0") or None,
         )
 
+    def _fetch_and_filter_repos(self) -> List[Dict]:
+        """Fetch all repositories and apply skip-pattern filtering."""
+        repositories = self.github.get_repositories()
+        if not repositories:
+            return []
+        return [
+            r for r in repositories
+            if not any(fnmatch.fnmatch(r["name"], p) for p in self.skip_patterns)
+        ]
+
+    def _validate_and_send(self, message: str, label: str = "message") -> bool:
+        """Validate Telegram token, send message, return True on success."""
+        if not self.telegram.validate():
+            print("Invalid Telegram token. Exiting.")
+            sys.exit(1)
+        ok = self.telegram.send(message)
+        if ok:
+            print(f"{label} sent.")
+        return ok
+
+    def _update_star_states(
+        self, repositories: List[Dict], all_states: Dict
+    ) -> None:
+        """Persist star/fork baselines so future runs can compute deltas."""
+        for r in repositories:
+            rname = r["name"]
+            if rname not in all_states:
+                all_states[rname] = {}
+            all_states[rname]["stars"] = r.get("stargazers_count", 0)
+            all_states[rname]["forks"] = r.get("forks_count", 0)
+        save_all_repository_states(self.username, all_states)
+
     def _collect_repo_data(self, repo: Dict, old_state: Dict) -> Dict[str, Any]:
         """Perform all per-repo API calls and return collected data + new state.
 
@@ -198,20 +230,26 @@ class GitHubMonitor:
         elif not star_delta and not fork_delta:
             print(f"[{name}] no changes")
 
-        # Update repository state
+        # Update repository state.
+        # Prioritise items returned by the API (newest first) so that the
+        # [:LIMIT] slice always retains the most recent entries rather than a
+        # random subset produced by set-to-list conversion.
         all_current_shas = [c.get("sha") for c in all_commits if c.get("sha")]
-        updated_shas = list(set(known_shas) | set(all_current_shas))
+        _current_sha_set = set(all_current_shas)
+        updated_shas = all_current_shas + [s for s in list(known_shas) if s not in _current_sha_set]
 
         all_current_pr_numbers = [p["number"] for p in prs_raw]
-        updated_pr_numbers = list(set(known_pr_numbers) | set(all_current_pr_numbers))
+        _current_pr_set = set(all_current_pr_numbers)
+        updated_pr_numbers = all_current_pr_numbers + [n for n in list(known_pr_numbers) if n not in _current_pr_set]
 
         all_current_run_ids = [w.get("id") for w in workflows_raw if w.get("id")]
-        updated_run_ids = list(set(known_run_ids) | set(all_current_run_ids))
+        _current_run_set = set(all_current_run_ids)
+        updated_run_ids = all_current_run_ids + [i for i in list(known_run_ids) if i not in _current_run_set]
 
         new_state = {
-            "known_shas":       updated_shas[-MAX_KNOWN_SHAS:],
-            "known_pr_numbers": updated_pr_numbers[-200:],
-            "known_run_ids":    updated_run_ids[-200:],
+            "known_shas":       updated_shas[:MAX_KNOWN_SHAS],
+            "known_pr_numbers": updated_pr_numbers[:200],
+            "known_run_ids":    updated_run_ids[:200],
             "last_check":       datetime.now(timezone.utc).isoformat(),
             "stars":            info["stars"],
             "forks":            info["forks"],
@@ -236,15 +274,10 @@ class GitHubMonitor:
     def _run_summary(self) -> None:
         """--summary mode: compact digest of all repositories."""
         print("SUMMARY MODE: building repository digest...")
-        repositories = self.github.get_repositories()
+        repositories = self._fetch_and_filter_repos()
         if not repositories:
             print("No repositories found.")
             return
-
-        repositories = [
-            r for r in repositories
-            if not any(fnmatch.fnmatch(r["name"], p) for p in self.skip_patterns)
-        ]
 
         all_states, _ = load_all_repository_states(self.username)
         total_stars  = sum(r.get("stargazers_count", 0) for r in repositories)
@@ -296,33 +329,16 @@ class GitHubMonitor:
             print(re.sub(r"<[^>]+>", "", message))
             return
 
-        if not self.telegram.validate():
-            print("Invalid Telegram token. Exiting.")
-            sys.exit(1)
-
-        self.telegram.send(message)
-        # Update star states
-        for r in repositories:
-            rname = r["name"]
-            if rname not in all_states:
-                all_states[rname] = {}
-            all_states[rname]["stars"] = r.get("stargazers_count", 0)
-            all_states[rname]["forks"] = r.get("forks_count", 0)
-        save_all_repository_states(self.username, all_states)
-        print("Digest sent.")
+        self._validate_and_send(message, "Digest")
+        self._update_star_states(repositories, all_states)
 
     def _run_trending(self) -> None:
         """--trending mode: top-10 repos ranked by activity score."""
         print("TRENDING MODE: building trending report...")
-        repositories = self.github.get_repositories()
+        repositories = self._fetch_and_filter_repos()
         if not repositories:
             print("No repositories found.")
             return
-
-        repositories = [
-            r for r in repositories
-            if not any(fnmatch.fnmatch(r["name"], p) for p in self.skip_patterns)
-        ]
 
         all_states, _ = load_all_repository_states(self.username)
 
@@ -361,33 +377,16 @@ class GitHubMonitor:
             print(re.sub(r"<[^>]+>", "", message))
             return
 
-        if not self.telegram.validate():
-            print("Invalid Telegram token. Exiting.")
-            sys.exit(1)
-
-        self.telegram.send(message)
-        # Update star baseline after sending
-        for r in repositories:
-            rname = r["name"]
-            if rname not in all_states:
-                all_states[rname] = {}
-            all_states[rname]["stars"] = r.get("stargazers_count", 0)
-            all_states[rname]["forks"] = r.get("forks_count", 0)
-        save_all_repository_states(self.username, all_states)
-        print("Trending report sent.")
+        self._validate_and_send(message, "Trending report")
+        self._update_star_states(repositories, all_states)
 
     def _run_weekly(self) -> None:
         """--weekly mode: comprehensive weekly digest."""
         print("WEEKLY MODE: building weekly digest...")
-        repositories = self.github.get_repositories()
+        repositories = self._fetch_and_filter_repos()
         if not repositories:
             print("No repositories found.")
             return
-
-        repositories = [
-            r for r in repositories
-            if not any(fnmatch.fnmatch(r["name"], p) for p in self.skip_patterns)
-        ]
 
         all_states, _ = load_all_repository_states(self.username)
         message = MessageBuilder.build_weekly(self.username, repositories, all_states)
@@ -397,20 +396,8 @@ class GitHubMonitor:
             print(re.sub(r"<[^>]+>", "", message))
             return
 
-        if not self.telegram.validate():
-            print("Invalid Telegram token. Exiting.")
-            sys.exit(1)
-
-        self.telegram.send(message)
-        # Update star baseline after sending
-        for r in repositories:
-            rname = r["name"]
-            if rname not in all_states:
-                all_states[rname] = {}
-            all_states[rname]["stars"] = r.get("stargazers_count", 0)
-            all_states[rname]["forks"] = r.get("forks_count", 0)
-        save_all_repository_states(self.username, all_states)
-        print("Weekly digest sent.")
+        self._validate_and_send(message, "Weekly digest")
+        self._update_star_states(repositories, all_states)
 
     def run(self) -> None:
         """Main entry point: load state, collect data, format and send."""

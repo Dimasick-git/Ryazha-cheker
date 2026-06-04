@@ -1,5 +1,6 @@
 """Message formatting utilities: HTML helpers, emoji icons, and MessageBuilder."""
 
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -149,8 +150,7 @@ class MessageBuilder:
         # Include all repos with any change (commits, releases, stars, milestones, PRs),
         # not only those with commits — repos with a new release or star milestone
         # but zero commits would otherwise be silently dropped.
-        import os as _os
-        _limit = max(1, int(_os.environ.get("MAX_DISPLAY_REPOS", "5")))
+        _limit = max(1, int(os.environ.get("MAX_DISPLAY_REPOS", "5")))
         active_repos = repos_data[:_limit]
 
         if not active_repos:
