@@ -40,7 +40,10 @@ class TelegramClient:
         disable_web_page_preview: bool = True,
         reply_markup: Optional[Dict] = None,
     ) -> bool:
-        """Send a message, automatically splitting parts longer than 4096 chars."""
+        """Send a message, automatically splitting parts longer than 4096 chars.
+
+        Each part is retried up to 3 times (waits: 2s, 4s) on HTTP 429 or 5xx errors.
+        """
         parts = self._split(text)
         print(f"SEND parts={len(parts)} chat={self.chat_id}")
         all_ok = True
@@ -76,7 +79,13 @@ class TelegramClient:
         disable_web_page_preview: bool = True,
         reply_markup: Optional[Dict] = None,
     ) -> bool:
-        """Send one message part with exponential backoff retry (1s, 2s, 4s — max 3 retries)."""
+        """Send one message part with exponential backoff retry.
+
+        Retries up to 3 times total (waits of 2s then 4s) on:
+        - HTTP 429 (rate limit) — honours Retry-After header when present
+        - HTTP 5xx (server errors)
+        - Network Timeout / ConnectionError
+        """
         payload: Dict[str, Any] = {
             "chat_id": self.chat_id,
             "text": text,
@@ -89,7 +98,7 @@ class TelegramClient:
         if self.topic_id:
             payload["message_thread_id"] = self.topic_id
 
-        delay = 1  # exponential backoff: 1s → 2s → 4s
+        delays = [2, 4]  # waits before attempt 2 and 3
         for attempt in range(3):
             try:
                 resp = self.session.post(
@@ -97,6 +106,32 @@ class TelegramClient:
                     json=payload,
                     timeout=30,
                 )
+
+                # Retry on HTTP 429 (rate limit) with exponential backoff
+                if resp.status_code == 429:
+                    wait = delays[min(attempt, len(delays) - 1)]
+                    try:
+                        retry_after = int(resp.json().get("parameters", {}).get("retry_after", wait))
+                        wait = max(wait, retry_after)
+                    except Exception:
+                        pass
+                    print(f"  WARN HTTP 429 rate-limit (attempt {attempt + 1}/3) — waiting {wait}s")
+                    if attempt < 2:
+                        time.sleep(wait)
+                        continue
+                    print("  FAIL _send_part: all-attempts-exhausted")
+                    return False
+
+                # Retry on HTTP 5xx (server errors)
+                if resp.status_code >= 500:
+                    wait = delays[min(attempt, len(delays) - 1)]
+                    print(f"  WARN HTTP {resp.status_code} server error (attempt {attempt + 1}/3) — waiting {wait}s")
+                    if attempt < 2:
+                        time.sleep(wait)
+                        continue
+                    print("  FAIL _send_part: all-attempts-exhausted")
+                    return False
+
                 data = resp.json()
 
                 if data.get("ok"):
@@ -113,22 +148,24 @@ class TelegramClient:
                 elif "parse" in desc.lower():
                     print("  hint: HTML parse error; retry as plain")
                 elif "too many requests" in desc.lower():
-                    retry_after = data.get("parameters", {}).get("retry_after", delay)
+                    retry_after = data.get("parameters", {}).get("retry_after", delays[min(attempt, len(delays) - 1)])
                     print(f"   Flood control — waiting {retry_after}s")
-                    time.sleep(retry_after)
-                    delay = retry_after
-                    continue
+                    if attempt < 2:
+                        time.sleep(retry_after)
+                        continue
 
                 return False
 
             except requests.exceptions.Timeout:
-                print(f"  Timeout Telegram (attempt {attempt + 1}/3) — retry in {delay}s")
-                time.sleep(delay)
-                delay *= 2
+                wait = delays[min(attempt, len(delays) - 1)]
+                print(f"  Timeout Telegram (attempt {attempt + 1}/3) — retry in {wait}s")
+                if attempt < 2:
+                    time.sleep(wait)
             except requests.exceptions.ConnectionError as e:
-                print(f"  RETRY conn attempt={attempt + 1}/3 err={e} backoff={delay}s")
-                time.sleep(delay)
-                delay *= 2
+                wait = delays[min(attempt, len(delays) - 1)]
+                print(f"  RETRY conn attempt={attempt + 1}/3 err={e} backoff={wait}s")
+                if attempt < 2:
+                    time.sleep(wait)
             except Exception as e:
                 print(f"  ERR telegram-exc: {e}")
                 return False
