@@ -1,19 +1,16 @@
-"""GitHub API client with pagination and exponential backoff."""
+"""GitHub API client with pagination and exponential backoff (async httpx)."""
 
+import asyncio
+import os
 import random
-import threading
 import time
 from typing import Any, Dict, List, Optional
 
-import requests
+import httpx
 
 from .formatter import truncate
 
 GITHUB_API = "https://api.github.com"
-
-# Loaded from env vars at import time via the module that owns _int_env;
-# we import from the top-level constants module instead.
-import os
 
 
 def _int_env(name: str, default: int) -> int:
@@ -32,42 +29,37 @@ MAX_KNOWN_SHAS = _int_env("MAX_KNOWN_SHAS", 500)
 
 
 class GitHubClient:
-    # Limits concurrent API calls across all threads to avoid bursting the rate limit.
-    _api_semaphore = threading.Semaphore(3)
+    # Limits concurrent API calls to avoid bursting the rate limit.
+    _api_semaphore = asyncio.Semaphore(3)
 
     def __init__(self, token: str, username: str):
         self.username = username
         self._token = token
-        # Use threading.local() so each thread gets its own requests.Session,
-        # avoiding data races when ThreadPoolExecutor calls _get() concurrently.
-        self._local = threading.local()
-
-    def _get_session(self) -> requests.Session:
-        """Return a per-thread Session, creating one the first time in each thread."""
-        if not hasattr(self._local, "session"):
-            session = requests.Session()
-            session.headers.update({
+        self._client = httpx.AsyncClient(
+            headers={
                 "Authorization": f"Bearer {self._token}",
                 "Accept":        "application/vnd.github.v3+json",
-                "User-Agent":    f"GitHubMonitor/{self.username}",
-            })
-            self._local.session = session
-        return self._local.session
+                "User-Agent":    f"GitHubMonitor/{username}",
+            },
+            timeout=20.0,
+        )
 
-    def _get(self, url: str, params: dict = None, _retry: int = 3) -> Optional[Any]:
-        """GET request with rate-limit handling (exponential backoff) and error recovery."""
+    async def aclose(self) -> None:
+        """Close the underlying httpx client."""
+        await self._client.aclose()
+
+    async def _get(self, url: str, params: dict = None, _retry: int = 3) -> Optional[Any]:
+        """Async GET request with rate-limit handling (exponential backoff) and error recovery."""
         delay = 2
         for attempt in range(1, _retry + 1):
             try:
-                with self._api_semaphore:
-                    resp = self._get_session().get(url, params=params, timeout=20)
+                async with self._api_semaphore:
+                    resp = await self._client.get(url, params=params)
 
                 if resp.status_code == 429 or (
                     resp.status_code == 403
                     and "rate limit" in resp.text.lower()
                 ):
-                    # Respect Retry-After header (secondary rate limit) if present,
-                    # otherwise fall back to X-RateLimit-Reset.
                     retry_after = resp.headers.get("Retry-After")
                     if retry_after:
                         wait = float(retry_after) + random.uniform(0.5, 2.0)
@@ -76,17 +68,16 @@ class GitHubClient:
                         wait = max(reset_ts - int(time.time()), delay)
                         wait += random.uniform(0.5, delay)
                     print(f"WARN rate-limit attempt={attempt}/{_retry} wait={wait:.1f}s")
-                    time.sleep(wait)
+                    await asyncio.sleep(wait)
                     delay *= 2
                     continue
 
                 if resp.status_code == 200:
                     return resp.json()
 
-                # Retry on server errors (5xx); give up immediately on client errors (4xx).
                 if resp.status_code >= 500 and attempt < _retry:
                     print(f"WARN server-error status={resp.status_code} attempt={attempt}/{_retry}, retrying in {delay}s")
-                    time.sleep(delay)
+                    await asyncio.sleep(delay)
                     delay *= 2
                     continue
 
@@ -94,25 +85,25 @@ class GitHubClient:
                 print(f"   Ответ: {resp.text[:200]}")
                 return None
 
-            except requests.exceptions.Timeout:
+            except httpx.TimeoutException:
                 print(f"⏱  Таймаут (попытка {attempt}/{_retry}): {url}")
                 if attempt < _retry:
-                    time.sleep(delay)
+                    await asyncio.sleep(delay)
                     delay *= 2
                     continue
                 return None
-            except requests.exceptions.RequestException as e:
+            except httpx.RequestError as e:
                 print(f"ERR network: {e}")
                 return None
         return None
 
-    def get_repositories(self) -> List[Dict]:
+    async def get_repositories(self) -> List[Dict]:
         """All user repositories with pagination."""
         all_repos = []
         page = 1
 
         while True:
-            data = self._get(
+            data = await self._get(
                 f"{GITHUB_API}/users/{self.username}/repos",
                 params={"page": page, "per_page": 100, "type": "all"},
             )
@@ -122,16 +113,13 @@ class GitHubClient:
             if len(data) < 100:
                 break
             page += 1
-            time.sleep(API_DELAY)
+            await asyncio.sleep(API_DELAY)
 
         return all_repos
 
-    def list_commits(self, repo: str, count: int = 5) -> List[Dict]:
-        """Last N commits without loading changed files (1 API request).
-
-        Stores full SHA in "sha" field; display truncation happens at render time.
-        """
-        data = self._get(
+    async def list_commits(self, repo: str, count: int = 5) -> List[Dict]:
+        """Last N commits without loading changed files (1 API request)."""
+        data = await self._get(
             f"{GITHUB_API}/repos/{self.username}/{repo}/commits",
             params={"per_page": count},
         )
@@ -142,7 +130,7 @@ class GitHubClient:
         for c in data[:count]:
             try:
                 result.append({
-                    "sha":      c["sha"],          # full SHA — dedup uses this
+                    "sha":      c["sha"],
                     "message":  truncate(c["commit"]["message"].split("\n")[0], 60),
                     "author":   truncate(c["commit"]["author"]["name"], 25),
                     "date":     c["commit"]["author"]["date"],
@@ -153,9 +141,9 @@ class GitHubClient:
                 continue
         return result
 
-    def get_commit_files(self, repo: str, sha: str) -> List[Dict]:
+    async def get_commit_files(self, repo: str, sha: str) -> List[Dict]:
         """Load the list of changed files for a single commit."""
-        data = self._get(
+        data = await self._get(
             f"{GITHUB_API}/repos/{self.username}/{repo}/commits/{sha}"
         )
         if not data or "files" not in data:
@@ -174,9 +162,9 @@ class GitHubClient:
             })
         return result
 
-    def get_open_prs(self, repo: str, count: int = 3) -> List[Dict]:
+    async def get_open_prs(self, repo: str, count: int = 3) -> List[Dict]:
         """Open pull requests for a repository."""
-        data = self._get(
+        data = await self._get(
             f"{GITHUB_API}/repos/{self.username}/{repo}/pulls",
             params={"state": "open", "per_page": count},
         )
@@ -196,9 +184,9 @@ class GitHubClient:
                 continue
         return result
 
-    def get_releases(self, repo: str) -> List[Dict]:
+    async def get_releases(self, repo: str) -> List[Dict]:
         """Latest release for a repository."""
-        data = self._get(
+        data = await self._get(
             f"{GITHUB_API}/repos/{self.username}/{repo}/releases/latest",
         )
         if not data or not isinstance(data, dict):
@@ -215,9 +203,9 @@ class GitHubClient:
         except (KeyError, TypeError):
             return []
 
-    def get_workflow_runs(self, repo: str, count: int = 5) -> List[Dict]:
+    async def get_workflow_runs(self, repo: str, count: int = 5) -> List[Dict]:
         """Recent workflow runs for a repository."""
-        data = self._get(
+        data = await self._get(
             f"{GITHUB_API}/repos/{self.username}/{repo}/actions/runs",
             params={"per_page": count},
         )
@@ -239,12 +227,9 @@ class GitHubClient:
                 continue
         return result
 
-    def get_latest_repo_update(self) -> Optional[str]:
-        """Quick check: raw ISO string of the most recently updated repo.
-
-        Returns raw ISO string so ISO string comparisons are reliable.
-        """
-        data = self._get(
+    async def get_latest_repo_update(self) -> Optional[str]:
+        """Quick check: raw ISO string of the most recently updated repo."""
+        data = await self._get(
             f"{GITHUB_API}/users/{self.username}/repos",
             params={"type": "owner", "sort": "updated", "per_page": 1},
         )
@@ -253,42 +238,24 @@ class GitHubClient:
             return updated_at if updated_at else None
         return None
 
-    def get_open_issues_count(self, repo: str, open_issues_raw: int = -1, pr_count: int = 0) -> int:
-        """Open issue count (excluding PRs).
-
-        Uses the Issues API with ?state=open&filter=all to get only real issues
-        (not PRs). The repo-level open_issues_count field includes PRs, and
-        subtracting a capped pr_count (e.g. MAX_PRS=3) gives a wrong result
-        when the repo has more open PRs than that cap — so we avoid that approach.
-        """
-        # The Issues API with ?state=open returns both issues and PRs by default,
-        # but we can count only items that lack a "pull_request" key.
-        # To avoid paginating through all issues, we fetch up to 100 and count
-        # the non-PR items. For an accurate total we use the Search API approach:
-        # GET /repos/:owner/:repo/issues?state=open returns issues+PRs, but each
-        # item has a "pull_request" key when it is a PR. We rely on the GitHub
-        # Issues API which, when called without the "pulls" accept header, lets
-        # us pass type=issue via labels workaround. The simplest accurate method
-        # is to query the search API for `repo:owner/repo type:issue state:open`.
-        data = self._get(
+    async def get_open_issues_count(self, repo: str, open_issues_raw: int = -1, pr_count: int = 0) -> int:
+        """Open issue count (excluding PRs)."""
+        data = await self._get(
             f"{GITHUB_API}/search/issues",
             params={"q": f"repo:{self.username}/{repo} type:issue state:open", "per_page": 1},
         )
         if data and isinstance(data, dict) and "total_count" in data:
             return data["total_count"]
-        # Fallback: use the repo's open_issues_count field without subtracting
-        # a capped PR count, since that subtraction is inaccurate when there are
-        # more open PRs than the fetch limit.
         if open_issues_raw >= 0:
             return open_issues_raw
-        repo_data = self._get(f"{GITHUB_API}/repos/{self.username}/{repo}")
+        repo_data = await self._get(f"{GITHUB_API}/repos/{self.username}/{repo}")
         if repo_data and isinstance(repo_data, dict):
             return repo_data.get("open_issues_count", 0)
         return 0
 
-    def get_new_releases(self, repo: str, known_tag: Optional[str]) -> List[Dict]:
+    async def get_new_releases(self, repo: str, known_tag: Optional[str]) -> List[Dict]:
         """Return release if the tag has changed since the last check."""
-        releases = self.get_releases(repo)
+        releases = await self.get_releases(repo)
         if not releases:
             return []
         current_tag = releases[0].get("tag", "")
