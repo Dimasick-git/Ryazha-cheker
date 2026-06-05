@@ -4,12 +4,15 @@ import argparse
 import asyncio
 import fnmatch
 import hashlib
+import logging
 import os
 import re
 import sys
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+log = logging.getLogger(__name__)
 
 from .diffing import (
     compute_deltas,
@@ -110,9 +113,9 @@ class GitHubMonitor:
         if since_raw:
             try:
                 self.since_date = datetime.fromisoformat(since_raw).replace(tzinfo=timezone.utc)
-                print(f"--since filter active: only activity after {since_raw}")
+                log.info("--since filter active: only activity after %s", since_raw)
             except ValueError:
-                print(f"WARN --since value '{since_raw}' is not a valid YYYY-MM-DD date; ignoring.")
+                log.warning("--since value '%s' is not a valid YYYY-MM-DD date; ignoring.", since_raw)
 
         missing = []
         if not github_token:   missing.append("G_TOKEN")
@@ -122,8 +125,8 @@ class GitHubMonitor:
             if not self.chat_id:   missing.append("TELEGRAM_CHAT_ID")
 
         if missing:
-            print(f"FATAL missing env: {', '.join(missing)}")
-            print("   Configure them: Settings → Secrets and variables → Actions")
+            log.critical("Missing required env vars: %s", ", ".join(missing))
+            log.critical("Configure them: Settings → Secrets and variables → Actions")
             sys.exit(1)
 
         self.force_send = (
@@ -132,9 +135,9 @@ class GitHubMonitor:
         )
 
         if self.dry_run:
-            print("DRY-RUN: no telegram delivery.")
+            log.info("DRY-RUN: no Telegram delivery.")
         if self.force_send:
-            print("FORCE: bypassing early-exit and dedup checks.")
+            log.info("FORCE: bypassing early-exit and dedup checks.")
 
         self.github = GitHubClient(github_token, self.username)
         self.telegram = TelegramClient(
@@ -166,11 +169,11 @@ class GitHubMonitor:
     def _validate_and_send(self, message: str, label: str = "message") -> bool:
         """Validate Telegram token, send message, return True on success."""
         if not self.telegram.validate():
-            print("Invalid Telegram token. Exiting.")
+            log.critical("Invalid Telegram token. Exiting.")
             sys.exit(1)
         ok = self.telegram.send(message)
         if ok:
-            print(f"{label} sent.")
+            log.info("%s sent successfully.", label)
         return ok
 
     def _update_star_states(
@@ -212,13 +215,13 @@ class GitHubMonitor:
         info["star_delta"] = star_delta
         info["fork_delta"] = fork_delta
         if star_delta:
-            print(f"[{name}] stars +{star_delta}")
+            log.info("[%s] stars +%d", name, star_delta)
         if fork_delta:
-            print(f"[{name}] forks +{fork_delta}")
+            log.info("[%s] forks +%d", name, fork_delta)
 
         info["star_milestones"] = crossed
         for m in crossed:
-            print(f"[{name}] MILESTONE: {m} stars!")
+            log.info("[%s] MILESTONE: %d stars!", name, m)
 
         # Commits
         all_commits = await self.github.list_commits(name, count=MAX_COMMITS)
@@ -287,9 +290,9 @@ class GitHubMonitor:
 
         has_real_changes = bool(new_commits or star_delta or fork_delta)
         if new_commits:
-            print(f"[{name}] NEW COMMITS: {len(new_commits)}")
+            log.info("[%s] new commits: %d", name, len(new_commits))
         elif not star_delta and not fork_delta:
-            print(f"[{name}] no changes")
+            log.debug("[%s] no changes", name)
 
         # Build updated state via diffing module
         new_state = build_new_state(
@@ -318,10 +321,10 @@ class GitHubMonitor:
 
     async def _run_summary(self) -> None:
         """--summary mode: compact digest of all repositories."""
-        print("SUMMARY MODE: building repository digest...")
+        log.info("SUMMARY MODE: building repository digest...")
         repositories = await self._fetch_and_filter_repos()
         if not repositories:
-            print("No repositories found.")
+            log.warning("No repositories found.")
             return
 
         all_states, _ = load_all_repository_states(self.username)
@@ -368,10 +371,10 @@ class GitHubMonitor:
             lines.append(f"  • <a href=\"{url}\">{rname}</a> — {pushed}")
 
         message = "\n".join(lines)
-        print(f"Digest length: {len(message)} chars")
+        log.info("Digest length: %d chars", len(message))
 
         if self.dry_run:
-            print(re.sub(r"<[^>]+>", "", message))
+            log.info("DRY-RUN digest:\n%s", re.sub(r"<[^>]+>", "", message))
             return
 
         self._validate_and_send(message, "Digest")
@@ -379,10 +382,10 @@ class GitHubMonitor:
 
     async def _run_trending(self) -> None:
         """--trending mode: top-10 repos ranked by activity score."""
-        print("TRENDING MODE: building trending report...")
+        log.info("TRENDING MODE: building trending report...")
         repositories = await self._fetch_and_filter_repos()
         if not repositories:
-            print("No repositories found.")
+            log.warning("No repositories found.")
             return
 
         all_states, _ = load_all_repository_states(self.username)
@@ -408,10 +411,10 @@ class GitHubMonitor:
 
         ranked = sorted(repositories, key=_activity_score, reverse=True)
         message = MessageBuilder.build_trending(self.username, ranked, all_states)
-        print(f"Trending message length: {len(message)} chars")
+        log.info("Trending message length: %d chars", len(message))
 
         if self.dry_run:
-            print(re.sub(r"<[^>]+>", "", message))
+            log.info("DRY-RUN trending:\n%s", re.sub(r"<[^>]+>", "", message))
             return
 
         self._validate_and_send(message, "Trending report")
@@ -419,18 +422,18 @@ class GitHubMonitor:
 
     async def _run_weekly(self) -> None:
         """--weekly mode: comprehensive weekly digest."""
-        print("WEEKLY MODE: building weekly digest...")
+        log.info("WEEKLY MODE: building weekly digest...")
         repositories = await self._fetch_and_filter_repos()
         if not repositories:
-            print("No repositories found.")
+            log.warning("No repositories found.")
             return
 
         all_states, _ = load_all_repository_states(self.username)
         message = MessageBuilder.build_weekly(self.username, repositories, all_states)
-        print(f"Weekly digest length: {len(message)} chars")
+        log.info("Weekly digest length: %d chars", len(message))
 
         if self.dry_run:
-            print(re.sub(r"<[^>]+>", "", message))
+            log.info("DRY-RUN weekly:\n%s", re.sub(r"<[^>]+>", "", message))
             return
 
         self._validate_and_send(message, "Weekly digest")
@@ -438,11 +441,10 @@ class GitHubMonitor:
 
     async def _run_async(self) -> None:
         """Async main: load state, collect data, format and send."""
-        print(f"Starting GitHub monitor for: {self.username}")
-        print(f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        log.info("Starting GitHub monitor for: %s", self.username)
+        log.info("Time: %s", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"))
         if self.skip_patterns:
-            print(f"Skip patterns: {', '.join(self.skip_patterns)}")
-        print()
+            log.info("Skip patterns: %s", ", ".join(self.skip_patterns))
 
         if self.summary_mode:
             await self._run_summary()
@@ -458,32 +460,30 @@ class GitHubMonitor:
 
         _pre_loaded_states, is_cold_start = load_all_repository_states(self.username)
 
-        print("Checking for new updates...")
+        log.info("Checking for new updates...")
         latest_update = await self.github.get_latest_repo_update()
         last_check = load_last_check_date()
 
         if not self.force_send and latest_update and last_check and latest_update <= last_check:
-            print(f"No new updates found. Last update: {latest_update}")
-            print("No monitoring needed. Exiting.")
+            log.info("No new updates found. Last update: %s", latest_update)
+            log.info("No monitoring needed. Exiting.")
             return
 
         if latest_update:
-            print(f"Changes detected! Latest update: {latest_update}")
-            print(f"Previous check: {last_check or 'first run'}")
+            log.info("Changes detected! Latest update: %s", latest_update)
+            log.info("Previous check: %s", last_check or "first run")
 
         if not self.dry_run:
-            print()
-            print("Validating Telegram bot...")
+            log.info("Validating Telegram bot...")
             if not self.telegram.validate():
-                print("Invalid Telegram token. Exiting.")
+                log.critical("Invalid Telegram token. Exiting.")
                 sys.exit(1)
 
-        print()
-        print("Fetching repositories...")
+        log.info("Fetching repositories...")
         repositories = await self.github.get_repositories()
 
         if not repositories:
-            print("No repositories found or API error")
+            log.error("No repositories found or API error")
             self.telegram.send(
                 f"<b>GitHub Monitor</b>\n"
                 f"No repositories found for <code>{escape_html(self.username)}</code>\n"
@@ -495,10 +495,8 @@ class GitHubMonitor:
             r for r in repositories
             if not any(fnmatch.fnmatch(r["name"], p) for p in self.skip_patterns)
         ]
-        print(f"Repositories found: {len(repositories)}")
-
-        print()
-        print("Collecting repository information...")
+        log.info("Repositories found: %d", len(repositories))
+        log.info("Collecting repository information...")
 
         all_states = _pre_loaded_states
 
@@ -522,11 +520,11 @@ class GitHubMonitor:
             try:
                 rname, result = await asyncio.wait_for(coro, timeout=300)
                 results[rname] = result
-                print(f"  [{done_count}/{total_repos}] {rname} — done")
+                log.debug("[%d/%d] %s — done", done_count, total_repos, rname)
             except asyncio.TimeoutError:
-                print(f"  [{done_count}/{total_repos}] ??? — timeout (>300s)")
+                log.warning("[%d/%d] repo task timeout (>300s)", done_count, total_repos)
             except Exception as exc:
-                print(f"  [{done_count}/{total_repos}] ??? — error: {exc}")
+                log.error("[%d/%d] repo task error: %s", done_count, total_repos, exc)
 
         for repo in repositories:
             rname = repo["name"]
@@ -543,9 +541,8 @@ class GitHubMonitor:
                 repos_data.append(result["info"])
 
         if is_cold_start:
-            print()
-            print("COLD START: state file was missing or empty.")
-            print("Recording current state as baseline; next changes will trigger notifications.")
+            log.info("COLD START: state file was missing or empty.")
+            log.info("Recording current state as baseline; next changes will trigger notifications.")
             save_all_repository_states(self.username, all_states)
             if latest_update:
                 save_last_check_date(latest_update)
@@ -554,33 +551,24 @@ class GitHubMonitor:
                 "Current state recorded; future changes will be notified."
             )
             if self.dry_run:
-                print("DRY-RUN cold-start message:", cold_msg)
+                log.info("DRY-RUN cold-start message: %s", cold_msg)
             else:
                 self.telegram.send(cold_msg)
             return
 
         if not self.force_send and not has_real_changes:
-            print()
-            print("No real content changes detected.")
-            print("No monitoring needed. Exiting.")
+            log.info("No real content changes detected. No monitoring needed. Exiting.")
             return
 
         repos_data.sort(key=lambda x: x.get("pushed_at", ""), reverse=True)
 
-        print()
-        print("Building message...")
+        log.info("Building message...")
         message, markup = MessageBuilder.build(self.username, repos_data)
-        print(f"Message length: {len(message)} chars")
+        log.info("Message length: %d chars", len(message))
 
         if self.dry_run:
-            print()
-            print("─" * 60)
-            print("DRY-RUN: message that would be sent:")
-            print("─" * 60)
             plain = re.sub(r"<[^>]+>", "", message)
-            print(plain)
-            print("─" * 60)
-            print("DRY-RUN: Telegram not sent.")
+            log.info("DRY-RUN message:\n%s\n%s\n%s", "─" * 60, plain, "─" * 60)
             if latest_update:
                 save_last_check_date(latest_update)
             return
@@ -588,29 +576,26 @@ class GitHubMonitor:
         msg_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
         last_hash = load_last_message_hash()
         if not self.force_send and last_hash and last_hash == msg_hash:
-            print()
-            print(f"Message unchanged (hash={msg_hash}). Skipping send.")
+            log.info("Message unchanged (hash=%s). Skipping send.", msg_hash)
             save_all_repository_states(self.username, all_states)
             if latest_update:
                 save_last_check_date(latest_update)
             return
 
-        print()
-        print("Sending to Telegram...")
+        log.info("Sending to Telegram...")
         success = self.telegram.send(message, reply_markup=markup)
 
-        print()
         if success:
-            print("Monitor completed successfully")
+            log.info("Monitor completed successfully.")
             save_all_repository_states(self.username, all_states)
             updates: Dict[str, Any] = {"last_message_hash": msg_hash}
             if latest_update:
                 updates["last_check_date"] = latest_update
             _update_check_state(**updates)
             if latest_update:
-                print(f"Last check date updated: {latest_update}")
+                log.info("Last check date updated: %s", latest_update)
         else:
-            print("Monitor completed with send errors")
+            log.error("Monitor completed with send errors.")
             save_all_repository_states(self.username, all_states)
             if latest_update:
                 save_last_check_date(latest_update)

@@ -1,5 +1,6 @@
 """Telegram Bot API client with retry and exponential backoff."""
 
+import logging
 import re
 import time
 from typing import Any, Dict, List, Optional
@@ -8,6 +9,8 @@ import requests
 
 TELEGRAM_API = "https://api.telegram.org"
 TELEGRAM_MAX_LENGTH = 4096
+
+log = logging.getLogger(__name__)
 
 
 class TelegramClient:
@@ -25,12 +28,12 @@ class TelegramClient:
             data = resp.json()
             if data.get("ok"):
                 bot = data["result"]
-                print(f"OK bot=@{bot['username']} id={bot['id']}")
+                log.info("Bot validated: @%s id=%d", bot['username'], bot['id'])
                 return True
-            print(f"ERR getMe: {data.get('description')}")
+            log.error("getMe failed: %s", data.get('description'))
             return False
         except Exception as e:
-            print(f"ERR getMe-exc: {e}")
+            log.error("getMe exception: %s", e)
             return False
 
     def send(
@@ -45,23 +48,22 @@ class TelegramClient:
         Each part is retried up to 3 times (waits: 2s, 4s) on HTTP 429 or 5xx errors.
         """
         parts = self._split(text)
-        print(f"SEND parts={len(parts)} chat={self.chat_id}")
+        log.info("Sending message: %d part(s) to chat=%s", len(parts), self.chat_id)
         all_ok = True
         for i, part in enumerate(parts, 1):
             # Buttons are sent only with the last part
             current_markup = reply_markup if i == len(parts) else None
             ok = self._send_part(part, parse_mode, disable_web_page_preview, current_markup)
             if ok:
-                print(f"  OK part={i}/{len(parts)} bytes={len(part)}")
+                log.debug("Part %d/%d sent (%d bytes)", i, len(parts), len(part))
             else:
-                print(f"  RETRY part={i}/{len(parts)} fallback=plain")
-                # Fallback: strip HTML tags and send plain text
+                log.warning("Part %d/%d failed HTML, retrying as plain text", i, len(parts))
                 plain = self._strip_html(part)
                 ok = self._send_part(plain, parse_mode=None)
                 if ok:
-                    print(f"  OK part={i}/{len(parts)} fallback=plain")
+                    log.info("Part %d/%d sent as plain text fallback", i, len(parts))
                 else:
-                    print(f"  FAIL part={i}/{len(parts)} all-attempts-exhausted")
+                    log.error("Part %d/%d failed all attempts", i, len(parts))
                     all_ok = False
 
             if i < len(parts):
@@ -107,7 +109,6 @@ class TelegramClient:
                     timeout=30,
                 )
 
-                # Retry on HTTP 429 (rate limit) with exponential backoff
                 if resp.status_code == 429:
                     wait = delays[min(attempt, len(delays) - 1)]
                     try:
@@ -115,21 +116,21 @@ class TelegramClient:
                         wait = max(wait, retry_after)
                     except Exception:
                         pass
-                    print(f"  WARN HTTP 429 rate-limit (attempt {attempt + 1}/3) — waiting {wait}s")
+                    log.warning("HTTP 429 rate-limit attempt=%d/3, waiting %ds", attempt + 1, wait)
                     if attempt < 2:
                         time.sleep(wait)
                         continue
-                    print("  FAIL _send_part: all-attempts-exhausted")
+                    log.error("_send_part: all attempts exhausted (429)")
                     return False
 
-                # Retry on HTTP 5xx (server errors)
                 if resp.status_code >= 500:
                     wait = delays[min(attempt, len(delays) - 1)]
-                    print(f"  WARN HTTP {resp.status_code} server error (attempt {attempt + 1}/3) — waiting {wait}s")
+                    log.warning("HTTP %d server error attempt=%d/3, waiting %ds",
+                                resp.status_code, attempt + 1, wait)
                     if attempt < 2:
                         time.sleep(wait)
                         continue
-                    print("  FAIL _send_part: all-attempts-exhausted")
+                    log.error("_send_part: all attempts exhausted (5xx)")
                     return False
 
                 data = resp.json()
@@ -138,18 +139,17 @@ class TelegramClient:
                     return True
 
                 desc = data.get("description", "unknown error")
-                print(f"  WARN telegram: {desc}")
+                log.warning("Telegram API error: %s", desc)
 
-                # Hints for common errors
                 if "chat not found" in desc.lower():
-                    print("  hint: verify CHAT_ID (send /start to bot)")
+                    log.info("Hint: verify CHAT_ID (send /start to bot)")
                 elif "blocked" in desc.lower():
-                    print("  hint: user blocked the bot")
+                    log.info("Hint: user has blocked the bot")
                 elif "parse" in desc.lower():
-                    print("  hint: HTML parse error; retry as plain")
+                    log.info("Hint: HTML parse error — will retry as plain text")
                 elif "too many requests" in desc.lower():
                     retry_after = data.get("parameters", {}).get("retry_after", delays[min(attempt, len(delays) - 1)])
-                    print(f"   Flood control — waiting {retry_after}s")
+                    log.warning("Flood control — waiting %ds", retry_after)
                     if attempt < 2:
                         time.sleep(retry_after)
                         continue
@@ -158,27 +158,24 @@ class TelegramClient:
 
             except requests.exceptions.Timeout:
                 wait = delays[min(attempt, len(delays) - 1)]
-                print(f"  Timeout Telegram (attempt {attempt + 1}/3) — retry in {wait}s")
+                log.warning("Telegram timeout attempt=%d/3, retry in %ds", attempt + 1, wait)
                 if attempt < 2:
                     time.sleep(wait)
             except requests.exceptions.ConnectionError as e:
                 wait = delays[min(attempt, len(delays) - 1)]
-                print(f"  RETRY conn attempt={attempt + 1}/3 err={e} backoff={wait}s")
+                log.warning("Connection error attempt=%d/3 backoff=%ds: %s", attempt + 1, wait, e)
                 if attempt < 2:
                     time.sleep(wait)
             except Exception as e:
-                print(f"  ERR telegram-exc: {e}")
+                log.error("Telegram unexpected exception: %s", e)
                 return False
 
-        print("  FAIL _send_part: all-attempts-exhausted")
+        log.error("_send_part: all attempts exhausted")
         return False
 
     @staticmethod
     def _split(text: str, limit: int = TELEGRAM_MAX_LENGTH) -> List[str]:
-        """Split text into parts of at most `limit` characters, cutting on newlines.
-
-        Guard against empty string after lstrip to avoid appending empty parts.
-        """
+        """Split text into parts of at most `limit` characters, cutting on newlines."""
         if len(text) <= limit:
             return [text]
 
@@ -187,7 +184,6 @@ class TelegramClient:
             if len(text) <= limit:
                 parts.append(text)
                 break
-            # Find last newline within the allowed range
             cut = text.rfind("\n", 0, limit)
             if cut == -1:
                 cut = limit

@@ -1,6 +1,7 @@
 """GitHub API client with pagination and exponential backoff (async httpx)."""
 
 import asyncio
+import logging
 import os
 import random
 import time
@@ -11,6 +12,8 @@ import httpx
 from .formatter import truncate
 
 GITHUB_API = "https://api.github.com"
+
+log = logging.getLogger(__name__)
 
 
 def _int_env(name: str, default: int) -> int:
@@ -67,7 +70,7 @@ class GitHubClient:
                         reset_ts = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
                         wait = max(reset_ts - int(time.time()), delay)
                         wait += random.uniform(0.5, delay)
-                    print(f"WARN rate-limit attempt={attempt}/{_retry} wait={wait:.1f}s")
+                    log.warning("Rate-limit hit attempt=%d/%d wait=%.1fs", attempt, _retry, wait)
                     await asyncio.sleep(wait)
                     delay *= 2
                     continue
@@ -76,24 +79,25 @@ class GitHubClient:
                     return resp.json()
 
                 if resp.status_code >= 500 and attempt < _retry:
-                    print(f"WARN server-error status={resp.status_code} attempt={attempt}/{_retry}, retrying in {delay}s")
+                    log.warning("Server error status=%d attempt=%d/%d, retrying in %ds",
+                                resp.status_code, attempt, _retry, delay)
                     await asyncio.sleep(delay)
                     delay *= 2
                     continue
 
-                print(f"ERR github-api status={resp.status_code} url={url}")
-                print(f"   Ответ: {resp.text[:200]}")
+                log.error("GitHub API error status=%d url=%s body=%s",
+                          resp.status_code, url, resp.text[:200])
                 return None
 
             except httpx.TimeoutException:
-                print(f"⏱  Таймаут (попытка {attempt}/{_retry}): {url}")
+                log.warning("Timeout attempt=%d/%d url=%s", attempt, _retry, url)
                 if attempt < _retry:
                     await asyncio.sleep(delay)
                     delay *= 2
                     continue
                 return None
             except httpx.RequestError as e:
-                print(f"ERR network: {e}")
+                log.error("Network error: %s", e)
                 return None
         return None
 

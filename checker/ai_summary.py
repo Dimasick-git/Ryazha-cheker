@@ -1,7 +1,13 @@
-"""AI-powered commit summarization using Anthropic Claude API."""
+"""AI-powered commit summarization using Anthropic Claude API.
+
+Cache is persisted to disk (ai_summary_cache.json) so summaries survive
+between GitHub Actions runs and avoid redundant API calls.
+"""
 import hashlib
+import json
 import logging
 import os
+import tempfile
 import time
 from typing import Optional
 
@@ -14,8 +20,13 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 
-_CACHE_TTL = 3600  # 1 hour
+_CACHE_TTL = 86400        # 24 hours — summaries stay valid for a full day
+_CACHE_MAX = 500          # max entries in cache file
+_CACHE_FILE = "ai_summary_cache.json"
+
+# In-memory layer (loaded from disk on first use)
 _cache: dict[str, tuple[str, float]] = {}
+_cache_loaded = False
 _client = None
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
@@ -29,6 +40,74 @@ _SYSTEM_PROMPT = (
 )
 
 
+# ──────────────────────────────────────────────────────────────
+# DISK CACHE
+# ──────────────────────────────────────────────────────────────
+
+def _load_cache() -> None:
+    global _cache, _cache_loaded
+    if _cache_loaded:
+        return
+    _cache_loaded = True
+    if not os.path.exists(_CACHE_FILE):
+        return
+    try:
+        with open(_CACHE_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        now = time.time()
+        # raw format: {key: [summary, timestamp]}
+        _cache = {
+            k: (v[0], v[1])
+            for k, v in raw.items()
+            if isinstance(v, list) and len(v) == 2 and now - v[1] < _CACHE_TTL
+        }
+        log.debug("AI summary cache loaded: %d valid entries from %s", len(_cache), _CACHE_FILE)
+    except Exception as e:
+        log.warning("Failed to load AI summary cache: %s", e)
+        _cache = {}
+
+
+def _save_cache() -> None:
+    try:
+        # Evict expired entries before saving
+        now = time.time()
+        active = {k: v for k, v in _cache.items() if now - v[1] < _CACHE_TTL}
+        # Trim to max size by age
+        if len(active) > _CACHE_MAX:
+            sorted_keys = sorted(active, key=lambda k: active[k][1])
+            for old in sorted_keys[:len(active) - _CACHE_MAX]:
+                active.pop(old, None)
+        serializable = {k: [v[0], v[1]] for k, v in active.items()}
+
+        dir_ = os.path.dirname(os.path.abspath(_CACHE_FILE)) or "."
+        fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(serializable, f, ensure_ascii=False)
+        os.replace(tmp, _CACHE_FILE)
+        log.debug("AI summary cache saved: %d entries to %s", len(active), _CACHE_FILE)
+    except Exception as e:
+        log.warning("Failed to save AI summary cache: %s", e)
+
+
+def _get_cached(key: str) -> Optional[str]:
+    _load_cache()
+    entry = _cache.get(key)
+    if entry and time.time() - entry[1] < _CACHE_TTL:
+        return entry[0]
+    _cache.pop(key, None)
+    return None
+
+
+def _set_cached(key: str, value: str) -> None:
+    _load_cache()
+    _cache[key] = (value, time.time())
+    _save_cache()
+
+
+# ──────────────────────────────────────────────────────────────
+# CLIENT
+# ──────────────────────────────────────────────────────────────
+
 def _get_client():
     global _client
     if _client is None and _anthropic_available and ANTHROPIC_API_KEY:
@@ -40,17 +119,26 @@ def is_available() -> bool:
     return bool(ANTHROPIC_API_KEY and _anthropic_available)
 
 
+# ──────────────────────────────────────────────────────────────
+# SUMMARIZE
+# ──────────────────────────────────────────────────────────────
+
 def summarize_commits(repo_name: str, commits: list) -> Optional[str]:
-    """Summarize commits for a repo. Returns Russian summary or None if unavailable."""
+    """Summarize commits for a repo. Returns Russian summary or None if unavailable.
+
+    Results are cached to disk for 24 hours so repeated runs for the same
+    commits do not consume API quota.
+    """
     if not commits or not is_available():
         return None
 
     commit_shas = "".join(c.get("sha", "")[:8] for c in commits[:5])
     cache_key = hashlib.sha256(f"{repo_name}:{commit_shas}".encode()).hexdigest()[:16]
 
-    entry = _cache.get(cache_key)
-    if entry and time.time() - entry[1] < _CACHE_TTL:
-        return entry[0]
+    cached = _get_cached(cache_key)
+    if cached:
+        log.debug("AI cache hit for %s (key=%s)", repo_name, cache_key)
+        return cached
 
     lines = [f"Репозиторий: {repo_name}", "Новые коммиты:"]
     for c in commits[:5]:
@@ -76,8 +164,8 @@ def summarize_commits(repo_name: str, commits: list) -> Optional[str]:
         )
         result = resp.content[0].text.strip() if resp.content else None
         if result:
-            _cache[cache_key] = (result, time.time())
-            log.debug("AI summary generated for %s", repo_name)
+            _set_cached(cache_key, result)
+            log.info("AI summary generated for %s (key=%s)", repo_name, cache_key)
         return result
     except Exception as e:
         log.warning("AI summarization failed for %s: %s", repo_name, e)

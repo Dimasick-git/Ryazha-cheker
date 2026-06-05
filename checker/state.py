@@ -1,10 +1,13 @@
 """State persistence: atomic JSON reads/writes and cold-start protection."""
 
 import json
+import logging
 import os
 import tempfile
 import time
 from typing import Any, Dict, Optional, Tuple
+
+log = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -44,7 +47,7 @@ def _load_check_state() -> Dict[str, Any]:
             if isinstance(data, dict):
                 return data
     except Exception as e:
-        print(f"Error reading last_check.json: {e}")
+        log.error("Error reading last_check.json: %s", e)
     return {}
 
 
@@ -65,7 +68,7 @@ def _update_check_state(**updates: Any) -> None:
         data.update(updates)
         _atomic_json_write("last_check.json", data)
     except Exception as e:
-        print(f"Error updating last_check.json: {e}")
+        log.error("Error updating last_check.json: %s", e)
 
 
 def save_last_message_hash(h: str) -> None:
@@ -97,22 +100,22 @@ def load_all_repository_states(username: str) -> Tuple[Dict[str, Any], bool]:
                 data = json.load(f)
             elapsed_ms = (time.monotonic() - t0) * 1000
             if not isinstance(data, dict):
-                print(
-                    f"WARN repo_states_{username}.json: expected dict, "
-                    f"got {type(data).__name__}. Resetting state."
+                log.warning(
+                    "repo_states_%s.json: expected dict, got %s. Resetting state.",
+                    username, type(data).__name__,
                 )
                 return {}, True
             valid = {k: v for k, v in data.items() if isinstance(v, dict)}
-            print(
-                f"State index loaded: {len(valid)} repos in {elapsed_ms:.1f} ms "
-                f"(from {state_file})"
+            log.info(
+                "State index loaded: %d repos in %.1f ms (from %s)",
+                len(valid), elapsed_ms, state_file,
             )
             if not valid:
                 return {}, True
             return valid, False
         return {}, True
     except Exception as e:
-        print(f"Error loading repository states: {e}")
+        log.error("Error loading repository states: %s", e)
         return {}, True
 
 
@@ -121,5 +124,6 @@ def save_all_repository_states(username: str, states: Dict[str, Any]) -> None:
     try:
         state_file = f"repo_states_{username}.json"
         _atomic_json_write(state_file, states)
+        log.debug("Saved state for %d repos to %s", len(states), state_file)
     except Exception as e:
-        print(f"Error saving repository states: {e}")
+        log.error("Error saving repository states: %s", e)
