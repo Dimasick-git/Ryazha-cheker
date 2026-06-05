@@ -9,16 +9,8 @@ All logic lives in the checker/ package.
 import os
 import sys
 
-# ── Backward-compat re-exports for test_message_formatting.py ──
-# Tests import MessageBuilder, build_github_file_url, html_code_block,
-# and TelegramClient directly from `main`.  Keep these importable here.
-from checker.formatter import (  # noqa: F401
-    MessageBuilder,
-    build_github_file_url,
-    html_code_block,
-    escape_html,
-)
-from checker.telegram_client import TelegramClient  # noqa: F401
+from checker.formatter import escape_html
+from checker.telegram_client import TelegramClient
 from checker.monitor import GitHubMonitor
 
 

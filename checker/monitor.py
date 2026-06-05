@@ -1,6 +1,7 @@
 """GitHubMonitor: orchestration logic — coordinates API calls, state, and Telegram."""
 
-import concurrent.futures
+import argparse
+import asyncio
 import fnmatch
 import hashlib
 import os
@@ -10,6 +11,13 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from .diffing import (
+    compute_deltas,
+    filter_new_commits,
+    filter_new_prs,
+    filter_new_workflows,
+    build_new_state,
+)
 from .formatter import escape_html, language_icon, MessageBuilder
 from .github_client import (
     GitHubClient,
@@ -33,6 +41,45 @@ from .telegram_client import TelegramClient
 from .formatter import fmt_date, STAR_MILESTONES
 
 
+def _parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the monitor."""
+    parser = argparse.ArgumentParser(description="GitHub Repository Monitor")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print message without sending to Telegram",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass early-exit and dedup checks",
+    )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Send compact digest of all repositories",
+    )
+    parser.add_argument(
+        "--trending",
+        action="store_true",
+        help="Send top-10 repos ranked by activity score",
+    )
+    parser.add_argument(
+        "--weekly",
+        action="store_true",
+        help="Send comprehensive weekly digest",
+    )
+    parser.add_argument(
+        "--since",
+        metavar="YYYY-MM-DD",
+        default=None,
+        help="Only report activity after this date (ISO format, e.g. 2024-01-15)",
+    )
+    # parse_known_args so that unknown flags (e.g. from GitHub Actions) don't fail
+    args, _ = parser.parse_known_args()
+    return args
+
+
 class GitHubMonitor:
     def __init__(self):
         try:
@@ -41,29 +88,31 @@ class GitHubMonitor:
         except ImportError:
             pass
 
+        args = _parse_args()
+
         github_token   = os.getenv("G_TOKEN", "").strip()
         telegram_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
         self.chat_id   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
         self.username  = os.getenv("G_USERNAME", "").strip()
 
         # Comma-separated repo names/glob patterns to skip.
-        # Supports fnmatch wildcards, e.g. "Ryazha*,Sys-clk,Atmosphere"
         skip_raw = os.getenv("SKIP_REPOS", "").strip()
         self.skip_patterns: list = [r.strip() for r in skip_raw.split(",") if r.strip()]
 
-        self.dry_run = "--dry-run" in sys.argv or os.getenv("DRY_RUN", "").lower() in ("1", "true")
-        self.summary_mode = (
-            "--summary" in sys.argv
-            or os.getenv("SUMMARY_MODE", "").lower() in ("1", "true")
-        )
-        self.trending_mode = (
-            "--trending" in sys.argv
-            or os.getenv("TRENDING_MODE", "").lower() in ("1", "true")
-        )
-        self.weekly_mode = (
-            "--weekly" in sys.argv
-            or os.getenv("WEEKLY_MODE", "").lower() in ("1", "true")
-        )
+        self.dry_run = args.dry_run or os.getenv("DRY_RUN", "").lower() in ("1", "true")
+        self.summary_mode = args.summary or os.getenv("SUMMARY_MODE", "").lower() in ("1", "true")
+        self.trending_mode = args.trending or os.getenv("TRENDING_MODE", "").lower() in ("1", "true")
+        self.weekly_mode = args.weekly or os.getenv("WEEKLY_MODE", "").lower() in ("1", "true")
+
+        # --since: only report activity after this date
+        since_raw = args.since or os.getenv("SINCE_DATE", "").strip()
+        self.since_date: Optional[datetime] = None
+        if since_raw:
+            try:
+                self.since_date = datetime.fromisoformat(since_raw).replace(tzinfo=timezone.utc)
+                print(f"--since filter active: only activity after {since_raw}")
+            except ValueError:
+                print(f"WARN --since value '{since_raw}' is not a valid YYYY-MM-DD date; ignoring.")
 
         missing = []
         if not github_token:   missing.append("G_TOKEN")
@@ -78,7 +127,7 @@ class GitHubMonitor:
             sys.exit(1)
 
         self.force_send = (
-            "--force" in sys.argv
+            args.force
             or os.getenv("FORCE_SEND", "").lower() in ("1", "true")
         )
 
@@ -88,16 +137,25 @@ class GitHubMonitor:
             print("FORCE: bypassing early-exit and dedup checks.")
 
         self.github = GitHubClient(github_token, self.username)
-        # TELEGRAM_TOPIC_ID parsed as integer
         self.telegram = TelegramClient(
             telegram_token or "dry_run_placeholder",
             self.chat_id or "0",
             topic_id=int(os.getenv("TELEGRAM_TOPIC_ID") or "0") or None,
         )
 
-    def _fetch_and_filter_repos(self) -> List[Dict]:
+    def _is_after_since(self, date_str: str) -> bool:
+        """Return True if ``date_str`` is after self.since_date (or no filter set)."""
+        if not self.since_date or not date_str:
+            return True
+        try:
+            dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            return dt >= self.since_date
+        except Exception:
+            return True
+
+    async def _fetch_and_filter_repos(self) -> List[Dict]:
         """Fetch all repositories and apply skip-pattern filtering."""
-        repositories = self.github.get_repositories()
+        repositories = await self.github.get_repositories()
         if not repositories:
             return []
         return [
@@ -127,14 +185,10 @@ class GitHubMonitor:
             all_states[rname]["forks"] = r.get("forks_count", 0)
         save_all_repository_states(self.username, all_states)
 
-    def _collect_repo_data(self, repo: Dict, old_state: Dict) -> Dict[str, Any]:
-        """Perform all per-repo API calls and return collected data + new state.
-
-        Designed to be called concurrently via ThreadPoolExecutor.
-        """
+    async def _collect_repo_data(self, repo: Dict, old_state: Dict) -> Dict[str, Any]:
+        """Perform all per-repo API calls and return collected data + new state."""
         name = repo["name"]
 
-        # Base data from the repo list
         info: Dict[str, Any] = {
             "name":        name,
             "description": repo.get("description") or "",
@@ -153,11 +207,8 @@ class GitHubMonitor:
             "fork_delta":     0,
         }
 
-        # Star / fork deltas
-        old_stars = old_state.get("stars", info["stars"])
-        old_forks = old_state.get("forks", info["forks"])
-        star_delta = max(0, info["stars"] - old_stars)
-        fork_delta = max(0, info["forks"] - old_forks)
+        # Star / fork deltas via diffing module
+        star_delta, fork_delta, crossed = compute_deltas(info, old_state)
         info["star_delta"] = star_delta
         info["fork_delta"] = fork_delta
         if star_delta:
@@ -165,33 +216,28 @@ class GitHubMonitor:
         if fork_delta:
             print(f"[{name}] forks +{fork_delta}")
 
-        # Milestone: check if we crossed any star threshold this run
-        crossed = sorted(m for m in STAR_MILESTONES if old_stars < m <= info["stars"])
         info["star_milestones"] = crossed
         for m in crossed:
             print(f"[{name}] MILESTONE: {m} stars!")
 
-        # Commits: 1 request for the SHA list
-        all_commits = self.github.list_commits(name, count=MAX_COMMITS)
-        time.sleep(API_DELAY)
+        # Commits
+        all_commits = await self.github.list_commits(name, count=MAX_COMMITS)
+        await asyncio.sleep(API_DELAY)
 
-        # SHA deduplication uses full SHA
         known_shas = set(old_state.get("known_shas", []))
+        new_commits = filter_new_commits(all_commits, known_shas)
 
-        # First run: take only the latest commit
-        if not known_shas:
-            new_commits = all_commits[:1]
-        else:
-            new_commits = [c for c in all_commits if c.get("sha") not in known_shas]
+        # Apply --since filter on commits
+        if self.since_date:
+            new_commits = [c for c in new_commits if self._is_after_since(c.get("date", ""))]
 
-        # Load changed files ONLY for new commits
         for commit in new_commits:
-            commit["files"] = self.github.get_commit_files(name, commit["sha"])
-            time.sleep(API_DELAY)
+            commit["files"] = await self.github.get_commit_files(name, commit["sha"])
+            await asyncio.sleep(API_DELAY)
 
         info["recent_commits"] = new_commits
 
-        # AI commit summary (runs synchronously; graceful degradation if unavailable)
+        # AI commit summary
         if new_commits:
             try:
                 from .ai_summary import summarize_commits
@@ -203,17 +249,19 @@ class GitHubMonitor:
             info["ai_summary"] = None
 
         # PRs with deduplication
-        prs_raw = self.github.get_open_prs(name, count=MAX_PRS)
+        prs_raw = await self.github.get_open_prs(name, count=MAX_PRS)
         known_pr_numbers = set(old_state.get("known_pr_numbers", []))
-        if not known_pr_numbers:
-            new_prs = prs_raw[:1]
-        else:
-            new_prs = [p for p in prs_raw if p["number"] not in known_pr_numbers]
-        info["open_prs"] = new_prs
-        time.sleep(API_DELAY)
+        new_prs = filter_new_prs(prs_raw, known_pr_numbers)
 
-        # Issues: use the count from the repo list — saves an API call
-        info["open_issues"] = self.github.get_open_issues_count(
+        # Apply --since filter on PRs
+        if self.since_date:
+            new_prs = [p for p in new_prs if self._is_after_since(p.get("date", ""))]
+
+        info["open_prs"] = new_prs
+        await asyncio.sleep(API_DELAY)
+
+        # Issues
+        info["open_issues"] = await self.github.get_open_issues_count(
             name,
             open_issues_raw=repo.get("open_issues_count", 0),
             pr_count=len(prs_raw),
@@ -221,19 +269,21 @@ class GitHubMonitor:
 
         # Releases — only if the tag changed
         known_tag = old_state.get("latest_release_tag")
-        releases = self.github.get_new_releases(name, known_tag)
+        releases = await self.github.get_new_releases(name, known_tag)
+
+        # Apply --since filter on releases
+        if self.since_date and releases:
+            releases = [r for r in releases if self._is_after_since(r.get("published_at", ""))]
+
         info["releases"] = releases
-        time.sleep(API_DELAY)
+        await asyncio.sleep(API_DELAY)
 
         # Workflow runs with deduplication
-        workflows_raw = self.github.get_workflow_runs(name, count=MAX_WORKFLOWS)
+        workflows_raw = await self.github.get_workflow_runs(name, count=MAX_WORKFLOWS)
         known_run_ids = set(old_state.get("known_run_ids", []))
-        if not known_run_ids:
-            new_workflows = workflows_raw[:1]
-        else:
-            new_workflows = [w for w in workflows_raw if w.get("id") not in known_run_ids]
+        new_workflows = filter_new_workflows(workflows_raw, known_run_ids)
         info["workflow_runs"] = new_workflows
-        time.sleep(API_DELAY)
+        await asyncio.sleep(API_DELAY)
 
         has_real_changes = bool(new_commits or star_delta or fork_delta)
         if new_commits:
@@ -241,34 +291,18 @@ class GitHubMonitor:
         elif not star_delta and not fork_delta:
             print(f"[{name}] no changes")
 
-        # Update repository state.
-        # Prioritise items returned by the API (newest first) so that the
-        # [:LIMIT] slice always retains the most recent entries rather than a
-        # random subset produced by set-to-list conversion.
-        all_current_shas = [c.get("sha") for c in all_commits if c.get("sha")]
-        _current_sha_set = set(all_current_shas)
-        updated_shas = all_current_shas + [s for s in list(known_shas) if s not in _current_sha_set]
-
-        all_current_pr_numbers = [p["number"] for p in prs_raw]
-        _current_pr_set = set(all_current_pr_numbers)
-        updated_pr_numbers = all_current_pr_numbers + [n for n in list(known_pr_numbers) if n not in _current_pr_set]
-
-        all_current_run_ids = [w.get("id") for w in workflows_raw if w.get("id")]
-        _current_run_set = set(all_current_run_ids)
-        updated_run_ids = all_current_run_ids + [i for i in list(known_run_ids) if i not in _current_run_set]
-
-        new_state = {
-            "known_shas":       updated_shas[:MAX_KNOWN_SHAS],
-            "known_pr_numbers": updated_pr_numbers[:200],
-            "known_run_ids":    updated_run_ids[:200],
-            "last_check":       datetime.now(timezone.utc).isoformat(),
-            "stars":            info["stars"],
-            "forks":            info["forks"],
-        }
-        if releases:
-            new_state["latest_release_tag"] = releases[0].get("tag", known_tag)
-        elif known_tag:
-            new_state["latest_release_tag"] = known_tag
+        # Build updated state via diffing module
+        new_state = build_new_state(
+            all_commits=all_commits,
+            known_shas=known_shas,
+            prs_raw=prs_raw,
+            known_pr_numbers=known_pr_numbers,
+            workflows_raw=workflows_raw,
+            known_run_ids=known_run_ids,
+            info=info,
+            releases=releases,
+            known_tag=known_tag,
+        )
 
         include_in_report = bool(
             new_commits or new_prs or releases
@@ -282,10 +316,10 @@ class GitHubMonitor:
             "include_in_report": include_in_report,
         }
 
-    def _run_summary(self) -> None:
+    async def _run_summary(self) -> None:
         """--summary mode: compact digest of all repositories."""
         print("SUMMARY MODE: building repository digest...")
-        repositories = self._fetch_and_filter_repos()
+        repositories = await self._fetch_and_filter_repos()
         if not repositories:
             print("No repositories found.")
             return
@@ -343,10 +377,10 @@ class GitHubMonitor:
         self._validate_and_send(message, "Digest")
         self._update_star_states(repositories, all_states)
 
-    def _run_trending(self) -> None:
+    async def _run_trending(self) -> None:
         """--trending mode: top-10 repos ranked by activity score."""
         print("TRENDING MODE: building trending report...")
-        repositories = self._fetch_and_filter_repos()
+        repositories = await self._fetch_and_filter_repos()
         if not repositories:
             print("No repositories found.")
             return
@@ -354,14 +388,6 @@ class GitHubMonitor:
         all_states, _ = load_all_repository_states(self.username)
 
         def _activity_score(r: Dict) -> float:
-            """Higher score = more active / trending.
-
-            Score components:
-            - stars      (weighted x1)
-            - push recency bonus: repos pushed within the last 7 days get +200,
-              within 30 days +100
-            - open issues (weighted x0.5 — signals community engagement)
-            """
             stars  = r.get("stargazers_count", 0)
             issues = r.get("open_issues_count", 0)
             pushed = r.get("pushed_at") or ""
@@ -391,10 +417,10 @@ class GitHubMonitor:
         self._validate_and_send(message, "Trending report")
         self._update_star_states(repositories, all_states)
 
-    def _run_weekly(self) -> None:
+    async def _run_weekly(self) -> None:
         """--weekly mode: comprehensive weekly digest."""
         print("WEEKLY MODE: building weekly digest...")
-        repositories = self._fetch_and_filter_repos()
+        repositories = await self._fetch_and_filter_repos()
         if not repositories:
             print("No repositories found.")
             return
@@ -410,8 +436,8 @@ class GitHubMonitor:
         self._validate_and_send(message, "Weekly digest")
         self._update_star_states(repositories, all_states)
 
-    def run(self) -> None:
-        """Main entry point: load state, collect data, format and send."""
+    async def _run_async(self) -> None:
+        """Async main: load state, collect data, format and send."""
         print(f"Starting GitHub monitor for: {self.username}")
         print(f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
         if self.skip_patterns:
@@ -419,23 +445,21 @@ class GitHubMonitor:
         print()
 
         if self.summary_mode:
-            self._run_summary()
+            await self._run_summary()
             return
 
         if self.trending_mode:
-            self._run_trending()
+            await self._run_trending()
             return
 
         if self.weekly_mode:
-            self._run_weekly()
+            await self._run_weekly()
             return
 
-        # Load state BEFORE checking for updates so is_cold_start is set correctly.
         _pre_loaded_states, is_cold_start = load_all_repository_states(self.username)
 
-        # Quick check: were there any updates at all?
         print("Checking for new updates...")
-        latest_update = self.github.get_latest_repo_update()
+        latest_update = await self.github.get_latest_repo_update()
         last_check = load_last_check_date()
 
         if not self.force_send and latest_update and last_check and latest_update <= last_check:
@@ -447,7 +471,6 @@ class GitHubMonitor:
             print(f"Changes detected! Latest update: {latest_update}")
             print(f"Previous check: {last_check or 'first run'}")
 
-        # Validate Telegram bot (skipped in dry_run — token may be empty)
         if not self.dry_run:
             print()
             print("Validating Telegram bot...")
@@ -455,10 +478,9 @@ class GitHubMonitor:
                 print("Invalid Telegram token. Exiting.")
                 sys.exit(1)
 
-        # Fetch repositories
         print()
         print("Fetching repositories...")
-        repositories = self.github.get_repositories()
+        repositories = await self.github.get_repositories()
 
         if not repositories:
             print("No repositories found or API error")
@@ -469,7 +491,6 @@ class GitHubMonitor:
             )
             sys.exit(0)
 
-        # Filter skipped repositories (supports fnmatch glob patterns)
         repositories = [
             r for r in repositories
             if not any(fnmatch.fnmatch(r["name"], p) for p in self.skip_patterns)
@@ -484,37 +505,29 @@ class GitHubMonitor:
         repos_data: List[Dict] = []
         has_real_changes = False
 
-        # Concurrent per-repo API calls via ThreadPoolExecutor
-        def _worker(repo: Dict):
+        # Concurrent per-repo async tasks
+        total_repos = len(repositories)
+
+        async def _worker(repo: Dict):
             old_state = all_states.get(repo["name"], {})
-            result = self._collect_repo_data(repo, old_state)
+            result = await self._collect_repo_data(repo, old_state)
             return repo["name"], result
 
-        total_repos = len(repositories)
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=6, thread_name_prefix="gh-mon"
-        ) as executor:
-            futures = {executor.submit(_worker, repo): repo["name"] for repo in repositories}
-            results: Dict[str, Dict] = {}
-            done_count = 0
-            # 5-minute hard cap so a hung thread cannot block the whole run.
-            try:
-                completed = concurrent.futures.as_completed(futures, timeout=300)
-            except TypeError:
-                completed = concurrent.futures.as_completed(futures)
-            for future in completed:
-                repo_name = futures[future]
-                done_count += 1
-                try:
-                    rname, result = future.result(timeout=30)
-                    results[rname] = result
-                    print(f"  [{done_count}/{total_repos}] {rname} — done")
-                except concurrent.futures.TimeoutError:
-                    print(f"  [{done_count}/{total_repos}] {repo_name} — timeout (>30s)")
-                except Exception as exc:
-                    print(f"  [{done_count}/{total_repos}] {repo_name} — error: {exc}")
+        tasks = [asyncio.create_task(_worker(repo)) for repo in repositories]
+        results: Dict[str, Dict] = {}
+        done_count = 0
 
-        # Process results sequentially (state saving must be sequential)
+        for coro in asyncio.as_completed(tasks):
+            done_count += 1
+            try:
+                rname, result = await asyncio.wait_for(coro, timeout=300)
+                results[rname] = result
+                print(f"  [{done_count}/{total_repos}] {rname} — done")
+            except asyncio.TimeoutError:
+                print(f"  [{done_count}/{total_repos}] ??? — timeout (>300s)")
+            except Exception as exc:
+                print(f"  [{done_count}/{total_repos}] ??? — error: {exc}")
+
         for repo in repositories:
             rname = repo["name"]
             if rname not in results:
@@ -529,7 +542,6 @@ class GitHubMonitor:
             if result["include_in_report"]:
                 repos_data.append(result["info"])
 
-        # ── Cold start: write baseline without sending notifications ──
         if is_cold_start:
             print()
             print("COLD START: state file was missing or empty.")
@@ -553,10 +565,8 @@ class GitHubMonitor:
             print("No monitoring needed. Exiting.")
             return
 
-        # Sort by recency
         repos_data.sort(key=lambda x: x.get("pushed_at", ""), reverse=True)
 
-        # Build message
         print()
         print("Building message...")
         message, markup = MessageBuilder.build(self.username, repos_data)
@@ -575,7 +585,6 @@ class GitHubMonitor:
                 save_last_check_date(latest_update)
             return
 
-        # Deduplication: skip if content hasn't changed
         msg_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
         last_hash = load_last_message_hash()
         if not self.force_send and last_hash and last_hash == msg_hash:
@@ -593,11 +602,7 @@ class GitHubMonitor:
         print()
         if success:
             print("Monitor completed successfully")
-            # Save states ONLY after a successful send.
-            # If we save first and Telegram fails, the next run won't find changes
-            # (SHAs already in known_shas) and will skip the notification.
             save_all_repository_states(self.username, all_states)
-            # Single atomic write instead of two sequential ones
             updates: Dict[str, Any] = {"last_message_hash": msg_hash}
             if latest_update:
                 updates["last_check_date"] = latest_update
@@ -606,9 +611,11 @@ class GitHubMonitor:
                 print(f"Last check date updated: {latest_update}")
         else:
             print("Monitor completed with send errors")
-            # Save state even on partial failure to avoid re-sending already-sent parts.
             save_all_repository_states(self.username, all_states)
             if latest_update:
                 save_last_check_date(latest_update)
-            # Non-zero exit so GitHub Actions marks the step as failed.
             sys.exit(2)
+
+    def run(self) -> None:
+        """Entry point: run the async monitor via asyncio.run()."""
+        asyncio.run(self._run_async())
