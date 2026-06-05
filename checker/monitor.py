@@ -41,7 +41,8 @@ class GitHubMonitor:
         except ImportError:
             pass
 
-        github_token   = os.getenv("G_TOKEN", "").strip()
+        # Accept G_TOKEN (primary) or GITHUB_TOKEN (common CI alias) interchangeably
+        github_token   = (os.getenv("G_TOKEN", "") or os.getenv("GITHUB_TOKEN", "")).strip()
         telegram_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
         self.chat_id   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
         self.username  = os.getenv("G_USERNAME", "").strip()
@@ -357,14 +358,18 @@ class GitHubMonitor:
             """Higher score = more active / trending.
 
             Score components:
-            - stars      (weighted x1)
-            - push recency bonus: repos pushed within the last 7 days get +200,
-              within 30 days +100
-            - open issues (weighted x0.5 — signals community engagement)
+            - stars        (x1.0)
+            - forks        (x1.5 — stronger signal of adoption than stars)
+            - star delta   (x5   — recent star growth is a strong momentum signal)
+            - push recency bonus: ≤7d → +200, ≤30d → +100
+            - open issues  (x0.5 — community engagement)
             """
             stars  = r.get("stargazers_count", 0)
+            forks  = r.get("forks_count", 0)
             issues = r.get("open_issues_count", 0)
             pushed = r.get("pushed_at") or ""
+            old_st = all_states.get(r["name"], {}).get("stars", stars)
+            star_delta = max(0, stars - old_st)
 
             push_bonus = 0.0
             if pushed:
@@ -378,7 +383,7 @@ class GitHubMonitor:
                 except Exception:
                     pass
 
-            return stars + push_bonus + issues * 0.5
+            return stars * 1.0 + forks * 1.5 + star_delta * 5.0 + push_bonus + issues * 0.5
 
         ranked = sorted(repositories, key=_activity_score, reverse=True)
         message = MessageBuilder.build_trending(self.username, ranked, all_states)
