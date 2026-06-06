@@ -27,7 +27,7 @@ _CACHE_FILE = "ai_summary_cache.json"
 # In-memory layer (loaded from disk on first use)
 _cache: dict[str, tuple[str, float]] = {}
 _cache_loaded = False
-_client = None
+_async_client = None
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 AI_MODEL = os.getenv("AI_MODEL", "claude-haiku-4-5-20251001")
@@ -108,11 +108,11 @@ def _set_cached(key: str, value: str) -> None:
 # CLIENT
 # ──────────────────────────────────────────────────────────────
 
-def _get_client():
-    global _client
-    if _client is None and _anthropic_available and ANTHROPIC_API_KEY:
-        _client = _anthropic_mod.Anthropic(api_key=ANTHROPIC_API_KEY)
-    return _client
+def _get_async_client():
+    global _async_client
+    if _async_client is None and _anthropic_available and ANTHROPIC_API_KEY:
+        _async_client = _anthropic_mod.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    return _async_client
 
 
 def is_available() -> bool:
@@ -123,17 +123,20 @@ def is_available() -> bool:
 # SUMMARIZE
 # ──────────────────────────────────────────────────────────────
 
-def summarize_commits(repo_name: str, commits: list) -> Optional[str]:
+async def summarize_commits(repo_name: str, commits: list) -> Optional[str]:
     """Summarize commits for a repo. Returns Russian summary or None if unavailable.
 
     Results are cached to disk for 24 hours so repeated runs for the same
     commits do not consume API quota.
+
+    Uses AsyncAnthropic to avoid blocking the event loop during API calls.
+    Cache key includes the model name so swapping AI_MODEL invalidates stale entries.
     """
     if not commits or not is_available():
         return None
 
     commit_shas = "".join(c.get("sha", "")[:8] for c in commits[:5])
-    cache_key = hashlib.sha256(f"{repo_name}:{commit_shas}".encode()).hexdigest()[:16]
+    cache_key = hashlib.sha256(f"{AI_MODEL}:{repo_name}:{commit_shas}".encode()).hexdigest()[:16]
 
     cached = _get_cached(cache_key)
     if cached:
@@ -153,10 +156,10 @@ def summarize_commits(repo_name: str, commits: list) -> Optional[str]:
     prompt = "\n".join(lines) + "\n\nКратко на русском (1-2 предложения):"
 
     try:
-        client = _get_client()
+        client = _get_async_client()
         if client is None:
             return None
-        resp = client.messages.create(
+        resp = await client.messages.create(
             model=AI_MODEL,
             max_tokens=160,
             system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],

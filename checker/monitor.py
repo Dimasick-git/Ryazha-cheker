@@ -244,7 +244,7 @@ class GitHubMonitor:
         if new_commits:
             try:
                 from .ai_summary import summarize_commits
-                ai_text = summarize_commits(name, new_commits)
+                ai_text = await summarize_commits(name, new_commits)
                 info["ai_summary"] = ai_text
             except Exception as exc:
                 log.warning("[%s] AI summary error: %s", name, exc)
@@ -605,4 +605,11 @@ class GitHubMonitor:
 
     def run(self) -> None:
         """Entry point: run the async monitor via asyncio.run()."""
-        asyncio.run(self._run_async())
+        asyncio.run(self._run_async_with_cleanup())
+
+    async def _run_async_with_cleanup(self) -> None:
+        """Wrapper that guarantees the httpx client is closed on exit."""
+        try:
+            await self._run_async()
+        finally:
+            await self.github.aclose()
