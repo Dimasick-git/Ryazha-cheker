@@ -246,7 +246,8 @@ class GitHubMonitor:
                 from .ai_summary import summarize_commits
                 ai_text = summarize_commits(name, new_commits)
                 info["ai_summary"] = ai_text
-            except Exception:
+            except Exception as exc:
+                log.warning("[%s] AI summary error: %s", name, exc)
                 info["ai_summary"] = None
         else:
             info["ai_summary"] = None
@@ -484,11 +485,12 @@ class GitHubMonitor:
 
         if not repositories:
             log.error("No repositories found or API error")
-            self.telegram.send(
-                f"<b>GitHub Monitor</b>\n"
-                f"No repositories found for <code>{escape_html(self.username)}</code>\n"
-                f"Check G_TOKEN permissions."
-            )
+            if not self.dry_run:
+                self.telegram.send(
+                    f"<b>GitHub Monitor</b>\n"
+                    f"No repositories found for <code>{escape_html(self.username)}</code>\n"
+                    f"Check G_TOKEN permissions."
+                )
             sys.exit(0)
 
         repositories = [
@@ -524,7 +526,7 @@ class GitHubMonitor:
             except asyncio.TimeoutError:
                 log.warning("[%d/%d] repo task timeout (>300s)", done_count, total_repos)
             except Exception as exc:
-                log.error("[%d/%d] repo task error: %s", done_count, total_repos, exc)
+                log.error("[%d/%d] repo task error: %s", done_count, total_repos, exc, exc_info=True)
 
         for repo in repositories:
             rname = repo["name"]
