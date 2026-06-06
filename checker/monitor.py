@@ -100,7 +100,13 @@ class GitHubMonitor:
 
         # Comma-separated repo names/glob patterns to skip.
         skip_raw = os.getenv("SKIP_REPOS", "").strip()
-        self.skip_patterns: list = [r.strip() for r in skip_raw.split(",") if r.strip()]
+        self.skip_patterns: list = []
+        for pat in (p.strip() for p in skip_raw.split(",") if p.strip()):
+            try:
+                fnmatch.translate(pat)  # validates pattern syntax
+                self.skip_patterns.append(pat)
+            except Exception as exc:
+                log.warning("SKIP_REPOS: invalid glob pattern %r — ignored (%s)", pat, exc)
 
         self.dry_run = args.dry_run or os.getenv("DRY_RUN", "").lower() in ("1", "true")
         self.summary_mode = args.summary or os.getenv("SUMMARY_MODE", "").lower() in ("1", "true")
@@ -165,6 +171,15 @@ class GitHubMonitor:
             r for r in repositories
             if not any(fnmatch.fnmatch(r["name"], p) for p in self.skip_patterns)
         ]
+
+    def _prune_deleted_repos(self, all_states: Dict, live_repo_names: set) -> int:
+        """Remove state entries for repos that no longer exist. Returns pruned count."""
+        stale = [name for name in list(all_states) if name not in live_repo_names]
+        for name in stale:
+            del all_states[name]
+        if stale:
+            log.info("Pruned %d stale repo(s) from state: %s", len(stale), ", ".join(stale))
+        return len(stale)
 
     def _validate_and_send(self, message: str, label: str = "message") -> bool:
         """Validate Telegram token, send message, return True on success."""
@@ -501,6 +516,8 @@ class GitHubMonitor:
         log.info("Collecting repository information...")
 
         all_states = _pre_loaded_states
+        live_names = {r["name"] for r in repositories}
+        self._prune_deleted_repos(all_states, live_names)
 
         repos_data: List[Dict] = []
         has_real_changes = False
