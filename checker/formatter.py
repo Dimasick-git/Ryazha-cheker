@@ -190,7 +190,8 @@ class MessageBuilder:
 
             meta_parts = [s for s in [star_str, fork_str, issue_str] if s]
             meta_str = " · " + " · ".join(meta_parts) if meta_parts else ""
-            lines.append(f"▸ <b>[{name}]</b> <i>{lang}</i>{meta_str}")
+            lang_icon = language_icon(repo.get("language"))
+            lines.append(f"▸ <b>[{name}]</b> {lang_icon} <i>{lang}</i>{meta_str}")
             buttons.append([{"text": f"open: {repo['name']}", "url": repo_url}])
 
             # Milestone notification
