@@ -30,6 +30,10 @@ MAX_RELEASES = _int_env("MAX_RELEASES", 1)
 MAX_WORKFLOWS = _int_env("MAX_WORKFLOWS", 3)
 MAX_KNOWN_SHAS = _int_env("MAX_KNOWN_SHAS", 500)
 
+# Circuit breaker: open after this many consecutive failures, reset after cooldown.
+_CB_FAILURE_THRESHOLD = _int_env("CB_FAILURE_THRESHOLD", 5)
+_CB_COOLDOWN_SECONDS = float(os.environ.get("CB_COOLDOWN_SECONDS", "60"))
+
 
 class GitHubClient:
     # Limits concurrent API calls to avoid bursting the rate limit.
@@ -46,6 +50,35 @@ class GitHubClient:
             },
             timeout=20.0,
         )
+        # Circuit breaker state (per client instance)
+        self._cb_failures: int = 0
+        self._cb_opened_at: float = 0.0
+
+    def _cb_is_open(self) -> bool:
+        """Return True when the circuit breaker is tripped and the cooldown hasn't elapsed."""
+        if self._cb_failures < _CB_FAILURE_THRESHOLD:
+            return False
+        if time.monotonic() - self._cb_opened_at >= _CB_COOLDOWN_SECONDS:
+            log.info("Circuit breaker: cooldown elapsed, resetting.")
+            self._cb_failures = 0
+            self._cb_opened_at = 0.0
+            return False
+        return True
+
+    def _cb_record_success(self) -> None:
+        self._cb_failures = 0
+        self._cb_opened_at = 0.0
+
+    def _cb_record_failure(self) -> None:
+        self._cb_failures += 1
+        if self._cb_failures == _CB_FAILURE_THRESHOLD:
+            self._cb_opened_at = time.monotonic()
+            log.warning(
+                "Circuit breaker OPENED after %d consecutive failures. "
+                "Pausing GitHub API calls for %.0fs.",
+                _CB_FAILURE_THRESHOLD,
+                _CB_COOLDOWN_SECONDS,
+            )
 
     async def aclose(self) -> None:
         """Close the underlying httpx client."""
@@ -53,6 +86,10 @@ class GitHubClient:
 
     async def _get(self, url: str, params: dict = None, _retry: int = 3) -> Optional[Any]:
         """Async GET request with rate-limit handling (exponential backoff) and error recovery."""
+        if self._cb_is_open():
+            log.debug("Circuit breaker open — skipping %s", url)
+            return None
+
         delay = 2
         for attempt in range(1, _retry + 1):
             try:
@@ -76,6 +113,7 @@ class GitHubClient:
                     continue
 
                 if resp.status_code == 200:
+                    self._cb_record_success()
                     return resp.json()
 
                 if resp.status_code >= 500 and attempt < _retry:
@@ -87,6 +125,7 @@ class GitHubClient:
 
                 log.error("GitHub API error status=%d url=%s body=%s",
                           resp.status_code, url, resp.text[:200])
+                self._cb_record_failure()
                 return None
 
             except httpx.TimeoutException:
@@ -95,10 +134,13 @@ class GitHubClient:
                     await asyncio.sleep(delay)
                     delay *= 2
                     continue
+                self._cb_record_failure()
                 return None
             except httpx.RequestError as e:
                 log.error("Network error: %s", e)
+                self._cb_record_failure()
                 return None
+        self._cb_record_failure()
         return None
 
     async def get_repositories(self) -> List[Dict]:

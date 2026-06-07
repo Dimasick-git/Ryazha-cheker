@@ -9,6 +9,11 @@ from typing import Any, Dict, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
+# Bumped when the shape of stored data changes in a backward-incompatible way.
+# Readers that see a different version should reset to a cold-start state
+# rather than misinterpreting stale data.
+STATE_SCHEMA_VERSION = 2
+
 
 # ──────────────────────────────────────────────────────────────
 # ATOMIC WRITE
@@ -89,8 +94,9 @@ def load_all_repository_states(username: str) -> Tuple[Dict[str, Any], bool]:
     """Load all repository states from file in a single read.
 
     Returns ``(states, is_cold_start)``.  ``is_cold_start`` is True when the
-    state file is missing or empty — the caller should record the current state
-    as a baseline without sending notifications to avoid flooding.
+    state file is missing, empty, or carries an incompatible schema version —
+    the caller should record the current state as a baseline without sending
+    notifications to avoid flooding.
     """
     t0 = time.monotonic()
     try:
@@ -105,10 +111,21 @@ def load_all_repository_states(username: str) -> Tuple[Dict[str, Any], bool]:
                     username, type(data).__name__,
                 )
                 return {}, True
+
+            # Schema-version guard: treat incompatible files as a cold start.
+            stored_version = data.pop("_schema_version", 1)
+            if stored_version != STATE_SCHEMA_VERSION:
+                log.warning(
+                    "repo_states_%s.json: schema version %s != expected %s. "
+                    "Resetting to cold-start baseline.",
+                    username, stored_version, STATE_SCHEMA_VERSION,
+                )
+                return {}, True
+
             valid = {k: v for k, v in data.items() if isinstance(v, dict)}
             log.info(
-                "State index loaded: %d repos in %.1f ms (from %s)",
-                len(valid), elapsed_ms, state_file,
+                "State index loaded: %d repos in %.1f ms (from %s, schema v%s)",
+                len(valid), elapsed_ms, state_file, STATE_SCHEMA_VERSION,
             )
             if not valid:
                 return {}, True
@@ -123,7 +140,8 @@ def save_all_repository_states(username: str, states: Dict[str, Any]) -> None:
     """Save all repository states in a single atomic write."""
     try:
         state_file = f"repo_states_{username}.json"
-        _atomic_json_write(state_file, states)
+        payload = {"_schema_version": STATE_SCHEMA_VERSION, **states}
+        _atomic_json_write(state_file, payload)
         log.debug("Saved state for %d repos to %s", len(states), state_file)
     except Exception as e:
         log.error("Error saving repository states: %s", e)
