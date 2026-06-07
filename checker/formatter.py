@@ -258,6 +258,9 @@ class MessageBuilder:
                     f"🚀 <b>RELEASE:</b> <a href=\"{rurl}\">{tag}</a> — {rname}"
                     f"<i>{author_str} · {date}</i>"
                 )
+                release_ai = r.get("ai_summary")
+                if release_ai:
+                    lines.append(f"  📋 <i>{escape_html(release_ai)}</i>")
 
             # PRs
             prs = repo.get("open_prs", [])

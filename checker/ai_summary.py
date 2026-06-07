@@ -173,3 +173,66 @@ async def summarize_commits(repo_name: str, commits: list) -> Optional[str]:
     except Exception as e:
         log.warning("AI summarization failed for %s: %s", repo_name, e)
         return None
+
+
+_RELEASE_SYSTEM_PROMPT = (
+    "Ты — краткий суммаризатор релизов GitHub. "
+    "По тегу, описанию и названиям файлов релиза напиши 1-2 предложения на русском: "
+    "что изменилось и что нового для пользователей. "
+    "Будь конкретным и практичным. Не используй markdown."
+)
+
+
+async def summarize_release(repo_name: str, release: dict) -> Optional[str]:
+    """Summarize a GitHub release. Returns Russian summary or None if unavailable.
+
+    Cache key is based on the release tag + repo_name so identical releases
+    are never re-summarized across runs.
+    """
+    if not release or not is_available():
+        return None
+
+    tag = release.get("tag_name") or release.get("tag") or ""
+    if not tag:
+        return None
+
+    cache_key = hashlib.sha256(f"{AI_MODEL}:release:{repo_name}:{tag}".encode()).hexdigest()[:16]
+    cached = _get_cached(cache_key)
+    if cached:
+        log.debug("AI release cache hit for %s@%s (key=%s)", repo_name, tag, cache_key)
+        return cached
+
+    name = release.get("name") or tag
+    body = (release.get("body") or "").strip()[:600]
+    assets = release.get("assets", [])
+    asset_names = ", ".join(a.get("name", "") for a in assets[:6] if a.get("name"))
+
+    lines = [
+        f"Репозиторий: {repo_name}",
+        f"Релиз: {tag} — {name}",
+    ]
+    if body:
+        lines.append(f"Описание: {body}")
+    if asset_names:
+        lines.append(f"Файлы: {asset_names}")
+
+    prompt = "\n".join(lines) + "\n\nКратко на русском (1-2 предложения):"
+
+    try:
+        client = _get_async_client()
+        if client is None:
+            return None
+        resp = await client.messages.create(
+            model=AI_MODEL,
+            max_tokens=160,
+            system=[{"type": "text", "text": _RELEASE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": prompt}],
+        )
+        result = resp.content[0].text.strip() if resp.content else None
+        if result:
+            _set_cached(cache_key, result)
+            log.info("AI release summary generated for %s@%s (key=%s)", repo_name, tag, cache_key)
+        return result
+    except Exception as e:
+        log.warning("AI release summarization failed for %s@%s: %s", repo_name, tag, e)
+        return None

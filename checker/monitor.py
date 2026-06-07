@@ -294,6 +294,15 @@ class GitHubMonitor:
         if self.since_date and releases:
             releases = [r for r in releases if self._is_after_since(r.get("published_at", ""))]
 
+        # AI release summary for the latest new release
+        if releases:
+            try:
+                from .ai_summary import summarize_release
+                release_summary = await summarize_release(name, releases[0])
+                releases[0]["ai_summary"] = release_summary
+            except Exception as exc:
+                log.warning("[%s] AI release summary error: %s", name, exc)
+
         info["releases"] = releases
         await asyncio.sleep(API_DELAY)
 
