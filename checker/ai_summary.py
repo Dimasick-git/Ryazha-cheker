@@ -42,6 +42,27 @@ _SYSTEM_PROMPT = (
     "Будь конкретным. Не перечисляй SHA-хэши. Не используй markdown."
 )
 
+_RELEASE_SYSTEM_PROMPT = (
+    "Ты — краткий суммаризатор релизов GitHub. "
+    "По тегу, описанию и названиям файлов релиза напиши 1-2 предложения на русском: "
+    "что изменилось и что нового для пользователей. "
+    "Будь конкретным и практичным. Не используй markdown."
+)
+
+_PR_SYSTEM_PROMPT = (
+    "Ты — краткий суммаризатор GitHub Pull Requests. "
+    "По номерам, названиям и авторам PR напиши 1 предложение на русском: "
+    "что предлагается изменить в этих PR. Не используй markdown. "
+    "Если PR один — кратко его суть, если несколько — общая тема."
+)
+
+_WEEKLY_INSIGHTS_PROMPT = (
+    "Ты — аналитик GitHub-активности. "
+    "По статистике репозиториев за неделю напиши 2-3 предложения на русском: "
+    "краткий вывод об активности проекта, что развивалось активнее всего и что важно отметить. "
+    "Будь лаконичным и конкретным. Не используй markdown."
+)
+
 
 # ──────────────────────────────────────────────────────────────
 # DISK CACHE
@@ -123,7 +144,7 @@ def is_available() -> bool:
 
 
 # ──────────────────────────────────────────────────────────────
-# SUMMARIZE
+# SUMMARIZE COMMITS
 # ──────────────────────────────────────────────────────────────
 
 async def summarize_commits(repo_name: str, commits: list) -> Optional[str]:
@@ -178,13 +199,9 @@ async def summarize_commits(repo_name: str, commits: list) -> Optional[str]:
         return None
 
 
-_RELEASE_SYSTEM_PROMPT = (
-    "Ты — краткий суммаризатор релизов GitHub. "
-    "По тегу, описанию и названиям файлов релиза напиши 1-2 предложения на русском: "
-    "что изменилось и что нового для пользователей. "
-    "Будь конкретным и практичным. Не используй markdown."
-)
-
+# ──────────────────────────────────────────────────────────────
+# SUMMARIZE RELEASE
+# ──────────────────────────────────────────────────────────────
 
 async def summarize_release(repo_name: str, release: dict) -> Optional[str]:
     """Summarize a GitHub release. Returns Russian summary or None if unavailable.
@@ -238,4 +255,123 @@ async def summarize_release(repo_name: str, release: dict) -> Optional[str]:
         return result
     except Exception as e:
         log.warning("AI release summarization failed for %s@%s: %s", repo_name, tag, e)
+        return None
+
+
+# ──────────────────────────────────────────────────────────────
+# SUMMARIZE PR BATCH  (NEW)
+# ──────────────────────────────────────────────────────────────
+
+async def summarize_pr_batch(repo_name: str, prs: list) -> Optional[str]:
+    """Summarize new open PRs for a repo. Returns Russian one-liner or None.
+
+    Generates a brief description of what the PRs propose to change, cached
+    by repo name and PR numbers so repeated runs don't re-query the API.
+    """
+    if not prs or not is_available():
+        return None
+
+    pr_key = "".join(str(p.get("number", "")) for p in prs[:4])
+    cache_key = hashlib.sha256(f"{AI_MODEL}:prs:{repo_name}:{pr_key}".encode()).hexdigest()[:16]
+
+    cached = _get_cached(cache_key)
+    if cached:
+        log.debug("AI PR cache hit for %s (key=%s)", repo_name, cache_key)
+        return cached
+
+    lines = [f"Репозиторий: {repo_name}", "Новые открытые PR:"]
+    for p in prs[:4]:
+        num = p.get("number", "?")
+        title = (p.get("title") or "")[:100]
+        author = p.get("author") or p.get("login") or ""
+        entry = f"  #{num}: {title}"
+        if author:
+            entry += f" (by {author})"
+        lines.append(entry)
+
+    prompt = "\n".join(lines) + "\n\nОдним предложением — суть этих PR:"
+
+    try:
+        client = _get_async_client()
+        if client is None:
+            return None
+        resp = await client.messages.create(
+            model=AI_MODEL,
+            max_tokens=100,
+            system=[{"type": "text", "text": _PR_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": prompt}],
+        )
+        result = resp.content[0].text.strip() if resp.content else None
+        if result:
+            await _set_cached_async(cache_key, result)
+            log.info("AI PR summary generated for %s (key=%s)", repo_name, cache_key)
+        return result
+    except Exception as e:
+        log.warning("AI PR summarization failed for %s: %s", repo_name, e)
+        return None
+
+
+# ──────────────────────────────────────────────────────────────
+# SUMMARIZE WEEKLY INSIGHTS  (NEW)
+# ──────────────────────────────────────────────────────────────
+
+async def summarize_weekly_insights(
+    username: str,
+    total_repos: int,
+    total_stars: int,
+    total_commits_week: int,
+    top_active: list[str],
+    new_repos: list[str],
+    milestone_repos: list[str],
+) -> Optional[str]:
+    """Generate AI-powered weekly insight paragraph for the digest.
+
+    Produces a 2-3 sentence Russian summary of overall project activity,
+    cached for 6 hours to avoid re-generating on every --weekly run.
+    """
+    if not is_available():
+        return None
+
+    week_key = f"{username}:{total_repos}:{total_stars}:{total_commits_week}"
+    cache_key = hashlib.sha256(f"{AI_MODEL}:weekly:{week_key}".encode()).hexdigest()[:16]
+
+    # Weekly cache TTL is shorter — 6 hours
+    _load_cache()
+    entry = _cache.get(cache_key)
+    if entry and time.time() - entry[1] < 21600:
+        log.debug("AI weekly cache hit (key=%s)", cache_key)
+        return entry[0]
+
+    lines = [
+        f"Проект: {username} на GitHub",
+        f"Всего репозиториев: {total_repos}",
+        f"Суммарно звёзд: {total_stars}",
+        f"Коммитов за неделю (оценка): {total_commits_week}",
+    ]
+    if top_active:
+        lines.append(f"Самые активные репозитории: {', '.join(top_active[:5])}")
+    if new_repos:
+        lines.append(f"Новые репозитории: {', '.join(new_repos[:3])}")
+    if milestone_repos:
+        lines.append(f"Достигли вех по звёздам: {', '.join(milestone_repos[:3])}")
+
+    prompt = "\n".join(lines) + "\n\nКраткий аналитический вывод на русском (2-3 предложения):"
+
+    try:
+        client = _get_async_client()
+        if client is None:
+            return None
+        resp = await client.messages.create(
+            model=AI_MODEL,
+            max_tokens=200,
+            system=[{"type": "text", "text": _WEEKLY_INSIGHTS_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": prompt}],
+        )
+        result = resp.content[0].text.strip() if resp.content else None
+        if result:
+            await _set_cached_async(cache_key, result)
+            log.info("AI weekly insights generated (key=%s)", cache_key)
+        return result
+    except Exception as e:
+        log.warning("AI weekly insights failed: %s", e)
         return None
