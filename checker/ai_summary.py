@@ -5,6 +5,7 @@ between GitHub Actions runs and avoid redundant API calls.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -100,10 +101,10 @@ def _get_cached(key: str) -> Optional[str]:
     return None
 
 
-def _set_cached(key: str, value: str) -> None:
+async def _set_cached_async(key: str, value: str) -> None:
     _load_cache()
     _cache[key] = (value, time.time())
-    _save_cache()
+    await asyncio.to_thread(_save_cache)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -169,7 +170,7 @@ async def summarize_commits(repo_name: str, commits: list) -> Optional[str]:
         )
         result = resp.content[0].text.strip() if resp.content else None
         if result:
-            _set_cached(cache_key, result)
+            await _set_cached_async(cache_key, result)
             log.info("AI summary generated for %s (key=%s)", repo_name, cache_key)
         return result
     except Exception as e:
@@ -232,7 +233,7 @@ async def summarize_release(repo_name: str, release: dict) -> Optional[str]:
         )
         result = resp.content[0].text.strip() if resp.content else None
         if result:
-            _set_cached(cache_key, result)
+            await _set_cached_async(cache_key, result)
             log.info("AI release summary generated for %s@%s (key=%s)", repo_name, tag, cache_key)
         return result
     except Exception as e:

@@ -1,5 +1,6 @@
 """Telegram Bot API client with retry and exponential backoff."""
 
+import asyncio
 import logging
 import re
 import time
@@ -204,4 +205,22 @@ class TelegramClient:
             .replace("&lt;",   "<")
             .replace("&gt;",   ">")
             .replace("&quot;", '"')
+        )
+
+    # ── Async wrappers ────────────────────────────────────────────
+
+    async def validate_async(self) -> bool:
+        """Non-blocking wrapper around validate() for use in async code."""
+        return await asyncio.to_thread(self.validate)
+
+    async def send_async(
+        self,
+        text: str,
+        parse_mode: str = "HTML",
+        disable_web_page_preview: bool = True,
+        reply_markup: Optional[Dict] = None,
+    ) -> bool:
+        """Non-blocking wrapper around send() for use in async code."""
+        return await asyncio.to_thread(
+            self.send, text, parse_mode, disable_web_page_preview, reply_markup
         )
