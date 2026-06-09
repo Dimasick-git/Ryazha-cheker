@@ -51,44 +51,50 @@ class GitHubClient:
         # being instantiated before any event loop exists (DeprecationWarning
         # in Python 3.10+, RuntimeError in 3.12+).
         self._api_semaphore = asyncio.Semaphore(3)
-        # Circuit breaker state (per client instance)
-        self._cb_failures: int = 0
-        self._cb_opened_at: float = 0.0
+        # Per-repo circuit breaker: context -> (consecutive_failures, opened_at)
+        # Empty string "" is the global context (used for non-repo calls).
+        self._cb: dict = {}
 
-    def _cb_is_open(self) -> bool:
-        """Return True when the circuit breaker is tripped and the cooldown hasn't elapsed."""
-        if self._cb_failures < _CB_FAILURE_THRESHOLD:
+    def _cb_is_open(self, context: str = "") -> bool:
+        """Return True when the circuit breaker for `context` is open."""
+        failures, opened_at = self._cb.get(context, (0, 0.0))
+        if failures < _CB_FAILURE_THRESHOLD:
             return False
-        if time.monotonic() - self._cb_opened_at >= _CB_COOLDOWN_SECONDS:
-            log.info("Circuit breaker: cooldown elapsed, resetting.")
-            self._cb_failures = 0
-            self._cb_opened_at = 0.0
+        if time.monotonic() - opened_at >= _CB_COOLDOWN_SECONDS:
+            log.info("Circuit breaker [%s]: cooldown elapsed, resetting.", context or "global")
+            self._cb.pop(context, None)
             return False
         return True
 
-    def _cb_record_success(self) -> None:
-        self._cb_failures = 0
-        self._cb_opened_at = 0.0
+    def _cb_record_success(self, context: str = "") -> None:
+        self._cb.pop(context, None)
 
-    def _cb_record_failure(self) -> None:
-        self._cb_failures += 1
-        if self._cb_failures == _CB_FAILURE_THRESHOLD:
-            self._cb_opened_at = time.monotonic()
+    def _cb_record_failure(self, context: str = "") -> None:
+        failures, opened_at = self._cb.get(context, (0, 0.0))
+        failures += 1
+        if failures == _CB_FAILURE_THRESHOLD:
+            opened_at = time.monotonic()
             log.warning(
-                "Circuit breaker OPENED after %d consecutive failures. "
-                "Pausing GitHub API calls for %.0fs.",
+                "Circuit breaker OPENED [%s] after %d consecutive failures. "
+                "Pausing calls for %.0fs.",
+                context or "global",
                 _CB_FAILURE_THRESHOLD,
                 _CB_COOLDOWN_SECONDS,
             )
+        self._cb[context] = (failures, opened_at)
 
     async def aclose(self) -> None:
         """Close the underlying httpx client."""
         await self._client.aclose()
 
-    async def _get(self, url: str, params: dict = None, _retry: int = 3) -> Optional[Any]:
-        """Async GET request with rate-limit handling (exponential backoff) and error recovery."""
-        if self._cb_is_open():
-            log.debug("Circuit breaker open — skipping %s", url)
+    async def _get(self, url: str, params: dict = None, _retry: int = 3, context: str = "") -> Optional[Any]:
+        """Async GET request with rate-limit handling (exponential backoff) and error recovery.
+
+        `context` is an optional repo name used to scope the circuit breaker so that
+        persistent errors from one repo don't block all other repos.
+        """
+        if self._cb_is_open(context):
+            log.debug("Circuit breaker open [%s] — skipping %s", context or "global", url)
             return None
 
         delay = 2
@@ -114,7 +120,7 @@ class GitHubClient:
                     continue
 
                 if resp.status_code == 200:
-                    self._cb_record_success()
+                    self._cb_record_success(context)
                     return resp.json()
 
                 if resp.status_code >= 500 and attempt < _retry:
@@ -126,7 +132,7 @@ class GitHubClient:
 
                 log.error("GitHub API error status=%d url=%s body=%s",
                           resp.status_code, url, resp.text[:200])
-                self._cb_record_failure()
+                self._cb_record_failure(context)
                 return None
 
             except httpx.TimeoutException:
@@ -135,13 +141,13 @@ class GitHubClient:
                     await asyncio.sleep(delay)
                     delay *= 2
                     continue
-                self._cb_record_failure()
+                self._cb_record_failure(context)
                 return None
             except httpx.RequestError as e:
                 log.error("Network error: %s", e)
-                self._cb_record_failure()
+                self._cb_record_failure(context)
                 return None
-        self._cb_record_failure()
+        self._cb_record_failure(context)
         return None
 
     async def get_repositories(self) -> List[Dict]:
@@ -169,6 +175,7 @@ class GitHubClient:
         data = await self._get(
             f"{GITHUB_API}/repos/{self.username}/{repo}/commits",
             params={"per_page": count},
+            context=repo,
         )
         if not data or not isinstance(data, list):
             return []
@@ -191,7 +198,8 @@ class GitHubClient:
     async def get_commit_files(self, repo: str, sha: str) -> List[Dict]:
         """Load the list of changed files for a single commit."""
         data = await self._get(
-            f"{GITHUB_API}/repos/{self.username}/{repo}/commits/{sha}"
+            f"{GITHUB_API}/repos/{self.username}/{repo}/commits/{sha}",
+            context=repo,
         )
         if not data or "files" not in data:
             return []
@@ -214,6 +222,7 @@ class GitHubClient:
         data = await self._get(
             f"{GITHUB_API}/repos/{self.username}/{repo}/pulls",
             params={"state": "open", "per_page": count},
+            context=repo,
         )
         if not data or not isinstance(data, list):
             return []
@@ -235,6 +244,7 @@ class GitHubClient:
         """Latest release for a repository."""
         data = await self._get(
             f"{GITHUB_API}/repos/{self.username}/{repo}/releases/latest",
+            context=repo,
         )
         if not data or not isinstance(data, dict):
             return []
@@ -255,6 +265,7 @@ class GitHubClient:
         data = await self._get(
             f"{GITHUB_API}/repos/{self.username}/{repo}/actions/runs",
             params={"per_page": count},
+            context=repo,
         )
         if not data or not isinstance(data, dict) or "workflow_runs" not in data:
             return []
@@ -290,12 +301,13 @@ class GitHubClient:
         data = await self._get(
             f"{GITHUB_API}/search/issues",
             params={"q": f"repo:{self.username}/{repo} type:issue state:open", "per_page": 1},
+            context=repo,
         )
         if data and isinstance(data, dict) and "total_count" in data:
             return data["total_count"]
         if open_issues_raw >= 0:
             return open_issues_raw
-        repo_data = await self._get(f"{GITHUB_API}/repos/{self.username}/{repo}")
+        repo_data = await self._get(f"{GITHUB_API}/repos/{self.username}/{repo}", context=repo)
         if repo_data and isinstance(repo_data, dict):
             return repo_data.get("open_issues_count", 0)
         return 0
