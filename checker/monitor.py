@@ -181,12 +181,12 @@ class GitHubMonitor:
             log.info("Pruned %d stale repo(s) from state: %s", len(stale), ", ".join(stale))
         return len(stale)
 
-    def _validate_and_send(self, message: str, label: str = "message") -> bool:
+    async def _validate_and_send_async(self, message: str, label: str = "message") -> bool:
         """Validate Telegram token, send message, return True on success."""
-        if not self.telegram.validate():
+        if not await self.telegram.validate_async():
             log.critical("Invalid Telegram token. Exiting.")
             sys.exit(1)
-        ok = self.telegram.send(message)
+        ok = await self.telegram.send_async(message)
         if ok:
             log.info("%s sent successfully.", label)
         return ok
@@ -402,7 +402,7 @@ class GitHubMonitor:
             log.info("DRY-RUN digest:\n%s", re.sub(r"<[^>]+>", "", message))
             return
 
-        self._validate_and_send(message, "Digest")
+        await self._validate_and_send_async(message, "Digest")
         self._update_star_states(repositories, all_states)
 
     async def _run_trending(self) -> None:
@@ -442,7 +442,7 @@ class GitHubMonitor:
             log.info("DRY-RUN trending:\n%s", re.sub(r"<[^>]+>", "", message))
             return
 
-        self._validate_and_send(message, "Trending report")
+        await self._validate_and_send_async(message, "Trending report")
         self._update_star_states(repositories, all_states)
 
     async def _run_weekly(self) -> None:
@@ -461,7 +461,7 @@ class GitHubMonitor:
             log.info("DRY-RUN weekly:\n%s", re.sub(r"<[^>]+>", "", message))
             return
 
-        self._validate_and_send(message, "Weekly digest")
+        await self._validate_and_send_async(message, "Weekly digest")
         self._update_star_states(repositories, all_states)
 
     async def _run_async(self) -> None:
@@ -500,7 +500,7 @@ class GitHubMonitor:
 
         if not self.dry_run:
             log.info("Validating Telegram bot...")
-            if not self.telegram.validate():
+            if not await self.telegram.validate_async():
                 log.critical("Invalid Telegram token. Exiting.")
                 sys.exit(1)
 
@@ -510,7 +510,7 @@ class GitHubMonitor:
         if not repositories:
             log.error("No repositories found or API error")
             if not self.dry_run:
-                self.telegram.send(
+                await self.telegram.send_async(
                     f"<b>GitHub Monitor</b>\n"
                     f"No repositories found for <code>{escape_html(self.username)}</code>\n"
                     f"Check G_TOKEN permissions."
@@ -581,7 +581,7 @@ class GitHubMonitor:
             if self.dry_run:
                 log.info("DRY-RUN cold-start message: %s", cold_msg)
             else:
-                self.telegram.send(cold_msg)
+                await self.telegram.send_async(cold_msg)
             return
 
         if not self.force_send and not has_real_changes:
@@ -611,7 +611,7 @@ class GitHubMonitor:
             return
 
         log.info("Sending to Telegram...")
-        success = self.telegram.send(message, reply_markup=markup)
+        success = await self.telegram.send_async(message, reply_markup=markup)
 
         if success:
             log.info("Monitor completed successfully.")
