@@ -36,9 +36,6 @@ _CB_COOLDOWN_SECONDS = float(os.environ.get("CB_COOLDOWN_SECONDS", "60"))
 
 
 class GitHubClient:
-    # Limits concurrent API calls to avoid bursting the rate limit.
-    _api_semaphore = asyncio.Semaphore(3)
-
     def __init__(self, token: str, username: str):
         self.username = username
         self._token = token
@@ -50,6 +47,10 @@ class GitHubClient:
             },
             timeout=20.0,
         )
+        # Created here (not at class level) to avoid asyncio.Semaphore()
+        # being instantiated before any event loop exists (DeprecationWarning
+        # in Python 3.10+, RuntimeError in 3.12+).
+        self._api_semaphore = asyncio.Semaphore(3)
         # Circuit breaker state (per client instance)
         self._cb_failures: int = 0
         self._cb_opened_at: float = 0.0

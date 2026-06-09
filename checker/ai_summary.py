@@ -3,13 +3,15 @@
 Cache is persisted to disk (ai_summary_cache.json) so summaries survive
 between GitHub Actions runs and avoid redundant API calls.
 """
+from __future__ import annotations
+
 import hashlib
 import json
 import logging
 import os
 import tempfile
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 try:
     import anthropic as _anthropic_mod
@@ -25,7 +27,7 @@ _CACHE_MAX = 500          # max entries in cache file
 _CACHE_FILE = "ai_summary_cache.json"
 
 # In-memory layer (loaded from disk on first use)
-_cache: dict[str, tuple[str, float]] = {}
+_cache: dict[str, Tuple[str, float]] = {}
 _cache_loaded = False
 _async_client = None
 
