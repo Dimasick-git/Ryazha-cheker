@@ -41,6 +41,7 @@ from .state import (
     _update_check_state,
 )
 from .telegram_client import TelegramClient
+from .discord_client import DiscordWebhookClient
 from .formatter import fmt_date, STAR_MILESTONES
 
 
@@ -152,6 +153,14 @@ class GitHubMonitor:
             topic_id=int(os.getenv("TELEGRAM_TOPIC_ID") or "0") or None,
         )
 
+        # Optional Discord webhook — set DISCORD_WEBHOOK_URL to enable
+        discord_url = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+        self.discord: Optional[DiscordWebhookClient] = (
+            DiscordWebhookClient(discord_url) if discord_url else None
+        )
+        if self.discord:
+            log.info("Discord webhook enabled.")
+
     def _is_after_since(self, date_str: str) -> bool:
         """Return True if ``date_str`` is after self.since_date (or no filter set)."""
         if not self.since_date or not date_str:
@@ -182,13 +191,19 @@ class GitHubMonitor:
         return len(stale)
 
     async def _validate_and_send_async(self, message: str, label: str = "message") -> bool:
-        """Validate Telegram token, send message, return True on success."""
+        """Validate Telegram token, send message, and optionally send to Discord."""
         if not await self.telegram.validate_async():
             log.critical("Invalid Telegram token. Exiting.")
             sys.exit(1)
         ok = await self.telegram.send_async(message)
         if ok:
             log.info("%s sent successfully.", label)
+        if self.discord:
+            discord_ok = await asyncio.to_thread(self.discord.send, message)
+            if discord_ok:
+                log.info("%s sent to Discord.", label)
+            else:
+                log.warning("%s Discord delivery failed (Telegram succeeded).", label)
         return ok
 
     def _update_star_states(
@@ -510,11 +525,14 @@ class GitHubMonitor:
         if not repositories:
             log.error("No repositories found or API error")
             if not self.dry_run:
-                await self.telegram.send_async(
+                err_msg = (
                     f"<b>GitHub Monitor</b>\n"
                     f"No repositories found for <code>{escape_html(self.username)}</code>\n"
                     f"Check G_TOKEN permissions."
                 )
+                await self.telegram.send_async(err_msg)
+                if self.discord:
+                    await asyncio.to_thread(self.discord.send, err_msg)
             sys.exit(0)
 
         repositories = [
@@ -582,6 +600,8 @@ class GitHubMonitor:
                 log.info("DRY-RUN cold-start message: %s", cold_msg)
             else:
                 await self.telegram.send_async(cold_msg)
+                if self.discord:
+                    await asyncio.to_thread(self.discord.send, cold_msg)
             return
 
         if not self.force_send and not has_real_changes:
@@ -612,6 +632,10 @@ class GitHubMonitor:
 
         log.info("Sending to Telegram...")
         success = await self.telegram.send_async(message, reply_markup=markup)
+
+        if self.discord:
+            log.info("Sending to Discord...")
+            await asyncio.to_thread(self.discord.send, message)
 
         if success:
             log.info("Monitor completed successfully.")
