@@ -33,7 +33,7 @@ _cache_loaded = False
 _async_client = None
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
-AI_MODEL = os.getenv("AI_MODEL", "claude-haiku-4-5-20251001")
+AI_MODEL = os.getenv("AI_MODEL", "claude-haiku-4-5")
 
 _SYSTEM_PROMPT = (
     "Ты — краткий суммаризатор GitHub-активности. "

@@ -5,9 +5,10 @@
 чтобы не блокировать CI.
 """
 
+import asyncio
 import os
 import pytest
-import requests
+import httpx
 
 
 @pytest.mark.skipif(
@@ -18,7 +19,12 @@ def test_telegram_bot_info():
     """Проверяет корректность токена через getMe (без отправки сообщений)."""
     bot_token = os.environ['TELEGRAM_BOT_TOKEN']
     url = f'https://api.telegram.org/bot{bot_token}/getMe'
-    resp = requests.get(url, timeout=10)
+
+    async def _run():
+        async with httpx.AsyncClient(timeout=10) as client:
+            return await client.get(url)
+
+    resp = asyncio.run(_run())
     assert resp.status_code == 200, f'HTTP {resp.status_code}'
     data = resp.json()
     assert data.get('ok'), f'getMe failed: {data.get("description")}'
@@ -38,6 +44,11 @@ def test_telegram_send_message():
         'chat_id': chat_id,
         'text': 'TEST github-monitor\n\nif visible, integration ok.',
     }
-    resp = requests.post(url, json=payload, timeout=30)
+
+    async def _run():
+        async with httpx.AsyncClient(timeout=30) as client:
+            return await client.post(url, json=payload)
+
+    resp = asyncio.run(_run())
     assert resp.status_code == 200, f'HTTP {resp.status_code}: {resp.text}'
     assert resp.json().get('ok'), f'sendMessage failed: {resp.json().get("description")}'

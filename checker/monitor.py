@@ -199,7 +199,7 @@ class GitHubMonitor:
         if ok:
             log.info("%s sent successfully.", label)
         if self.discord:
-            discord_ok = await asyncio.to_thread(self.discord.send, message)
+            discord_ok = await self.discord.send(message)
             if discord_ok:
                 log.info("%s sent to Discord.", label)
             else:
@@ -532,7 +532,7 @@ class GitHubMonitor:
                 )
                 await self.telegram.send_async(err_msg)
                 if self.discord:
-                    await asyncio.to_thread(self.discord.send, err_msg)
+                    await self.discord.send(err_msg)
             sys.exit(0)
 
         repositories = [
@@ -601,7 +601,7 @@ class GitHubMonitor:
             else:
                 await self.telegram.send_async(cold_msg)
                 if self.discord:
-                    await asyncio.to_thread(self.discord.send, cold_msg)
+                    await self.discord.send(cold_msg)
             return
 
         if not self.force_send and not has_real_changes:
@@ -635,7 +635,7 @@ class GitHubMonitor:
 
         if self.discord:
             log.info("Sending to Discord...")
-            await asyncio.to_thread(self.discord.send, message)
+            await self.discord.send(message)
 
         if success:
             log.info("Monitor completed successfully.")
