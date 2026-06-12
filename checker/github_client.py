@@ -36,6 +36,11 @@ _CB_COOLDOWN_SECONDS = float(os.environ.get("CB_COOLDOWN_SECONDS", "60"))
 
 
 class GitHubClient:
+    # Warn when remaining API calls drop below this threshold.
+    _RATE_WARN_THRESHOLD = 20
+    # Proactively pause when remaining drops this low (avoids hitting the wall mid-run).
+    _RATE_PAUSE_THRESHOLD = 5
+
     def __init__(self, token: str, username: str):
         self.username = username
         self._token = token
@@ -54,6 +59,10 @@ class GitHubClient:
         # Per-repo circuit breaker: context -> (consecutive_failures, opened_at)
         # Empty string "" is the global context (used for non-repo calls).
         self._cb: dict = {}
+        # Proactive rate-limit tracking: updated from response headers after every call.
+        self._rate_remaining: int = 5000
+        self._rate_reset_ts: float = 0.0
+        self._rate_warned: bool = False
 
     def _cb_is_open(self, context: str = "") -> bool:
         """Return True when the circuit breaker for `context` is open."""
@@ -87,6 +96,54 @@ class GitHubClient:
         """Close the underlying httpx client."""
         await self._client.aclose()
 
+    def _update_rate_state(self, headers) -> None:
+        """Parse X-RateLimit-* headers and warn/pause proactively if running low."""
+        remaining_str = headers.get("X-RateLimit-Remaining")
+        reset_str = headers.get("X-RateLimit-Reset")
+        if remaining_str is None:
+            return
+        try:
+            self._rate_remaining = int(remaining_str)
+        except (ValueError, TypeError):
+            return
+        if reset_str:
+            try:
+                self._rate_reset_ts = float(reset_str)
+            except (ValueError, TypeError):
+                pass
+
+        if self._rate_remaining <= self._RATE_WARN_THRESHOLD and not self._rate_warned:
+            self._rate_warned = True
+            reset_in = max(0, int(self._rate_reset_ts - time.time()))
+            log.warning(
+                "GitHub rate limit low: %d calls remaining (resets in %ds). "
+                "Reduce polling frequency or add G_TOKEN with higher quota.",
+                self._rate_remaining, reset_in,
+            )
+        elif self._rate_remaining > self._RATE_WARN_THRESHOLD:
+            self._rate_warned = False
+
+    async def _proactive_rate_pause(self) -> None:
+        """If remaining calls are critically low, sleep until the reset window."""
+        if self._rate_remaining > self._RATE_PAUSE_THRESHOLD:
+            return
+        reset_in = max(0, self._rate_reset_ts - time.time())
+        if reset_in <= 0:
+            return
+        wait = reset_in + random.uniform(1.0, 3.0)
+        log.warning(
+            "GitHub rate limit critically low (%d remaining) — pausing %.0fs until reset.",
+            self._rate_remaining, wait,
+        )
+        await asyncio.sleep(wait)
+        self._rate_remaining = 5000
+        self._rate_warned = False
+
+    @property
+    def rate_limit_remaining(self) -> int:
+        """Most-recently observed X-RateLimit-Remaining value."""
+        return self._rate_remaining
+
     async def _get(self, url: str, params: dict = None, _retry: int = 3, context: str = "") -> Optional[Any]:
         """Async GET request with rate-limit handling (exponential backoff) and error recovery.
 
@@ -97,11 +154,15 @@ class GitHubClient:
             log.debug("Circuit breaker open [%s] — skipping %s", context or "global", url)
             return None
 
+        await self._proactive_rate_pause()
+
         delay = 2
         for attempt in range(1, _retry + 1):
             try:
                 async with self._api_semaphore:
                     resp = await self._client.get(url, params=params)
+
+                self._update_rate_state(resp.headers)
 
                 if resp.status_code == 429 or (
                     resp.status_code == 403
