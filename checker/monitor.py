@@ -238,6 +238,7 @@ class GitHubMonitor:
             "open_issues":    0,
             "star_delta":     0,
             "fork_delta":     0,
+            "pr_ai_summary":  None,
         }
 
         # Star / fork deltas via diffing module
@@ -292,6 +293,14 @@ class GitHubMonitor:
             new_prs = [p for p in new_prs if self._is_after_since(p.get("date", ""))]
 
         info["open_prs"] = new_prs
+
+        # AI PR summary
+        if new_prs:
+            try:
+                from .ai_summary import summarize_pr_batch
+                info["pr_ai_summary"] = await summarize_pr_batch(name, new_prs)
+            except Exception as exc:
+                log.warning("[%s] AI PR summary error: %s", name, exc)
         await asyncio.sleep(API_DELAY)
 
         # Issues
@@ -469,7 +478,42 @@ class GitHubMonitor:
             return
 
         all_states, _ = load_all_repository_states(self.username)
-        message = MessageBuilder.build_weekly(self.username, repositories, all_states)
+
+        # Generate AI weekly insights
+        ai_insights = None
+        try:
+            from .ai_summary import summarize_weekly_insights, is_available
+            if is_available():
+                top_active = [r["name"] for r in sorted(
+                    repositories, key=lambda r: r.get("pushed_at", ""), reverse=True
+                )[:5]]
+                new_repos: List[str] = []
+                for r in repositories:
+                    created_raw = r.get("created_at", "")
+                    if created_raw:
+                        try:
+                            dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                            if (datetime.now(timezone.utc) - dt).days <= 7:
+                                new_repos.append(r["name"])
+                        except Exception:
+                            pass
+                milestone_repos = [
+                    r["name"] for r in repositories
+                    if r.get("stargazers_count", 0) > all_states.get(r["name"], {}).get("stars", r.get("stargazers_count", 0))
+                ]
+                ai_insights = await summarize_weekly_insights(
+                    username=self.username,
+                    total_repos=len(repositories),
+                    total_stars=sum(r.get("stargazers_count", 0) for r in repositories),
+                    total_commits_week=0,
+                    top_active=top_active,
+                    new_repos=new_repos,
+                    milestone_repos=milestone_repos,
+                )
+        except Exception as exc:
+            log.warning("AI weekly insights error: %s", exc)
+
+        message = MessageBuilder.build_weekly(self.username, repositories, all_states, ai_insights=ai_insights)
         log.info("Weekly digest length: %d chars", len(message))
 
         if self.dry_run:
