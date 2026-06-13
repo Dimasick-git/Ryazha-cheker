@@ -77,6 +77,42 @@ def workflow_icon(conclusion: Optional[str], status: str) -> str:
 # HTML HELPERS
 # ──────────────────────────────────────────────────────────────
 
+def classify_commit(message: str) -> str:
+    """Detect conventional-commit type and return an emoji prefix."""
+    lower = message.lower().lstrip()
+    _PREFIXES = [
+        (("feat(", "feat:"),         "✨"),
+        (("fix(", "fix:"),           "🐛"),
+        (("perf(", "perf:"),         "⚡"),
+        (("refactor(", "refactor:"), "♻️"),
+        (("docs(", "docs:"),         "📝"),
+        (("chore(", "chore:"),       "🔧"),
+        (("build(", "build:"),       "🏗️"),
+        (("ci(", "ci:"),             "⚙️"),
+        (("test(", "test:"),         "🧪"),
+        (("release(", "release:"),   "🚀"),
+        (("style(", "style:"),       "💄"),
+    ]
+    for prefixes, emoji in _PREFIXES:
+        if any(lower.startswith(p) for p in prefixes):
+            return emoji
+    # Heuristic fallback for non-conventional commits
+    for kw, emoji in (
+        ("add", "✨"), ("new", "✨"), ("добав", "✨"), ("введ", "✨"),
+        ("fix", "🐛"), ("bug", "🐛"), ("исправ", "🐛"), ("патч", "🐛"),
+        ("update", "📦"), ("bump", "📦"), ("обновл", "📦"), ("upgrade", "📦"),
+        ("remove", "🗑️"), ("delete", "🗑️"), ("удал", "🗑️"),
+        ("refactor", "♻️"), ("clean", "♻️"), ("рефакт", "♻️"),
+        ("optim", "⚡"), ("perf", "⚡"), ("speed", "⚡"), ("оптим", "⚡"),
+        ("release", "🚀"), ("version", "🚀"), ("релиз", "🚀"),
+        ("docs", "📝"), ("readme", "📝"), ("документ", "📝"),
+        ("ci", "⚙️"), ("workflow", "⚙️"), ("actions", "⚙️"),
+    ):
+        if kw in lower:
+            return emoji
+    return "🔹"
+
+
 def escape_html(text: str) -> str:
     """Escape special characters for Telegram HTML parse_mode."""
     return (
@@ -227,12 +263,14 @@ class MessageBuilder:
             commits = repo.get("recent_commits", [])[:2]
             for c in commits:
                 sha = escape_html(c["sha"][:7])
-                msg = escape_html(c["message"])
+                raw_msg = c["message"]
+                msg = escape_html(raw_msg)
                 auth = escape_html(c["author"])
                 date = escape_html(fmt_date(c["date"]))
                 url = escape_html(c["html_url"])
+                commit_icon = classify_commit(raw_msg)
 
-                lines.append(f"  <a href=\"{url}\"><code>{sha}</code></a> {msg}")
+                lines.append(f"  {commit_icon} <a href=\"{url}\"><code>{sha}</code></a> {msg}")
                 lines.append(f"  <i>by {auth} @ {date}</i>")
 
                 files = c.get("files", [])
