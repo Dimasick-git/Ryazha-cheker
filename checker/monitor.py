@@ -9,7 +9,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
@@ -501,11 +501,19 @@ class GitHubMonitor:
                     r["name"] for r in repositories
                     if r.get("stargazers_count", 0) > all_states.get(r["name"], {}).get("stars", r.get("stargazers_count", 0))
                 ]
+                week_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+                active_week = sum(
+                    1 for r in repositories
+                    if r.get("pushed_at") and
+                    datetime.fromisoformat(
+                        r["pushed_at"].replace("Z", "+00:00")
+                    ) >= week_cutoff
+                )
                 ai_insights = await summarize_weekly_insights(
                     username=self.username,
                     total_repos=len(repositories),
                     total_stars=sum(r.get("stargazers_count", 0) for r in repositories),
-                    total_commits_week=0,
+                    total_commits_week=active_week,
                     top_active=top_active,
                     new_repos=new_repos,
                     milestone_repos=milestone_repos,
