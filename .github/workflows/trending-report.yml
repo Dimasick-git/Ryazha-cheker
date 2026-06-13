@@ -52,6 +52,8 @@ jobs:
           G_USERNAME:           ${{ secrets.G_USERNAME }}
           TELEGRAM_TOPIC_ID:    ${{ secrets.TELEGRAM_TOPIC_ID }}
           SKIP_REPOS:           ${{ vars.SKIP_REPOS }}
+          ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
+          AI_MODEL:             ${{ vars.AI_MODEL }}
           PYTHONUNBUFFERED:     "1"
           PYTHONFAULTHANDLER:   "1"
         run: |
