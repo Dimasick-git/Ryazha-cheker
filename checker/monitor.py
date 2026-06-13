@@ -520,7 +520,7 @@ class GitHubMonitor:
                 sys.exit(1)
 
         log.info("Fetching repositories...")
-        repositories = await self.github.get_repositories()
+        repositories = await self._fetch_and_filter_repos()
 
         if not repositories:
             log.error("No repositories found or API error")
@@ -535,10 +535,6 @@ class GitHubMonitor:
                     await self.discord.send(err_msg)
             sys.exit(0)
 
-        repositories = [
-            r for r in repositories
-            if not any(fnmatch.fnmatch(r["name"], p) for p in self.skip_patterns)
-        ]
         log.info("Repositories found: %d", len(repositories))
         log.info("Collecting repository information...")
 
