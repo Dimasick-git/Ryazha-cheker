@@ -81,7 +81,7 @@ class GitHubClient:
     def _cb_record_failure(self, context: str = "") -> None:
         failures, opened_at = self._cb.get(context, (0, 0.0))
         failures += 1
-        if failures == _CB_FAILURE_THRESHOLD:
+        if failures >= _CB_FAILURE_THRESHOLD:
             opened_at = time.monotonic()
             log.warning(
                 "Circuit breaker OPENED [%s] after %d consecutive failures. "

@@ -6,6 +6,7 @@ Parses CLI arguments, instantiates GitHubMonitor, and calls run().
 All logic lives in the checker/ package.
 """
 
+import asyncio
 import logging
 import os
 import sys
@@ -55,7 +56,7 @@ if __name__ == "__main__":
                     f"<code>{escape_html(type(e).__name__)}: "
                     f"{escape_html(str(e)[:500])}</code>"
                 )
-                _monitor_ref.telegram.send(error_msg)
+                asyncio.run(_monitor_ref.telegram.send_async(error_msg))
             except Exception as notify_err:
                 log.warning("ERR crash-notify: %s", notify_err)
         elif _tg_token and _tg_chat:
@@ -67,7 +68,7 @@ if __name__ == "__main__":
                     f"<code>{escape_html(type(e).__name__)}: "
                     f"{escape_html(str(e)[:500])}</code>"
                 )
-                _tmp_tg.send(error_msg)
+                asyncio.run(_tmp_tg.send_async(error_msg))
             except Exception as notify_err:
                 log.warning("ERR crash-notify: %s", notify_err)
 

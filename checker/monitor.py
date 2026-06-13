@@ -554,7 +554,8 @@ class GitHubMonitor:
 
         async def _worker(repo: Dict):
             old_state = all_states.get(repo["name"], {})
-            result = await self._collect_repo_data(repo, old_state)
+            # Apply timeout inside the task so cancellation actually reaches _collect_repo_data
+            result = await asyncio.wait_for(self._collect_repo_data(repo, old_state), timeout=300)
             return repo["name"], result
 
         tasks = [asyncio.create_task(_worker(repo)) for repo in repositories]
@@ -564,7 +565,7 @@ class GitHubMonitor:
         for coro in asyncio.as_completed(tasks):
             done_count += 1
             try:
-                rname, result = await asyncio.wait_for(coro, timeout=300)
+                rname, result = await coro
                 results[rname] = result
                 log.debug("[%d/%d] %s — done", done_count, total_repos, rname)
             except asyncio.TimeoutError:
