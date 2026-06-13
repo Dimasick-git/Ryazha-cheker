@@ -132,8 +132,10 @@ jobs:
           TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
           G_USERNAME:           ${{ secrets.G_USERNAME }}
           TELEGRAM_TOPIC_ID:    ${{ secrets.TELEGRAM_TOPIC_ID }}
+          ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
           SKIP_REPOS:           ${{ vars.SKIP_REPOS }}
           FORCE_SEND:           ${{ vars.FORCE_SEND }}
+          AI_MODEL:             ${{ vars.AI_MODEL }}
           PYTHONUNBUFFERED:     "1"
           PYTHONFAULTHANDLER:   "1"
         run: |
@@ -184,5 +186,6 @@ jobs:
             echo "| Время    | $(date -u '+%Y-%m-%d %H:%M UTC') |"
             echo "| Триггер  | \`${{ github.event_name }}\` |"
             echo "| Статус   | ${{ job.status }} |"
+            echo "| AI       | ${{ secrets.ANTHROPIC_API_KEY != '' && 'включён' || 'выключен (ANTHROPIC_API_KEY не задан)' }} |"
             echo "| Run      | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
           } >> "$GITHUB_STEP_SUMMARY"
