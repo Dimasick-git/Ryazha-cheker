@@ -143,15 +143,32 @@ def is_available() -> bool:
     return bool(ANTHROPIC_API_KEY and _anthropic_available)
 
 
+_RETRY_ATTEMPTS = 3
+_RETRY_BASE_DELAY = 1.5
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Return True for transient API errors that warrant a retry."""
+    if not _anthropic_available:
+        return False
+    if isinstance(exc, _anthropic_mod.RateLimitError):
+        return True
+    if isinstance(exc, _anthropic_mod.APIStatusError) and exc.status_code >= 500:
+        return True
+    if isinstance(exc, _anthropic_mod.APIConnectionError):
+        return True
+    return False
+
+
 async def _call_claude(
     system_prompt: str,
     user_prompt: str,
     cache_key: str,
-    max_tokens: int = 160,
+    max_tokens: int = 200,
     ttl: int = _CACHE_TTL,
     log_label: str = "",
 ) -> Optional[str]:
-    """Shared Claude API call with cache check, result caching, and error handling."""
+    """Shared Claude API call with cache, retry logic, and error handling."""
     cached = _get_cached(cache_key, ttl=ttl)
     if cached:
         log.debug("AI cache hit%s (key=%s)", f" for {log_label}" if log_label else "", cache_key)
@@ -161,21 +178,34 @@ async def _call_claude(
     if client is None:
         return None
 
-    try:
-        resp = await client.messages.create(
-            model=AI_MODEL,
-            max_tokens=max_tokens,
-            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-        result = resp.content[0].text.strip() if resp.content else None
-        if result:
-            await _set_cached_async(cache_key, result)
-            log.info("AI summary generated%s (key=%s)", f" for {log_label}" if log_label else "", cache_key)
-        return result
-    except Exception as e:
-        log.warning("Claude API call failed%s: %s", f" for {log_label}" if log_label else "", e)
-        return None
+    delay = _RETRY_BASE_DELAY
+    for attempt in range(1, _RETRY_ATTEMPTS + 1):
+        try:
+            resp = await client.messages.create(
+                model=AI_MODEL,
+                max_tokens=max_tokens,
+                system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+            result = resp.content[0].text.strip() if resp.content else None
+            if result:
+                await _set_cached_async(cache_key, result)
+                log.info("AI summary generated%s (key=%s)", f" for {log_label}" if log_label else "", cache_key)
+            return result
+        except Exception as e:
+            if _is_retryable(e) and attempt < _RETRY_ATTEMPTS:
+                log.warning(
+                    "Claude API attempt %d/%d failed%s (%s), retrying in %.1fs",
+                    attempt, _RETRY_ATTEMPTS,
+                    f" for {log_label}" if log_label else "",
+                    type(e).__name__, delay,
+                )
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+            log.warning("Claude API call failed%s: %s", f" for {log_label}" if log_label else "", e)
+            return None
+    return None
 
 
 # ──────────────────────────────────────────────────────────────
@@ -208,7 +238,7 @@ async def summarize_commits(repo_name: str, commits: list) -> Optional[str]:
         lines.append(line)
 
     prompt = "\n".join(lines) + "\n\nКратко на русском (1-2 предложения):"
-    return await _call_claude(_SYSTEM_PROMPT, prompt, cache_key, max_tokens=160, log_label=repo_name)
+    return await _call_claude(_SYSTEM_PROMPT, prompt, cache_key, max_tokens=200, log_label=repo_name)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -246,7 +276,7 @@ async def summarize_release(repo_name: str, release: dict) -> Optional[str]:
 
     prompt = "\n".join(lines) + "\n\nКратко на русском (1-2 предложения):"
     return await _call_claude(
-        _RELEASE_SYSTEM_PROMPT, prompt, cache_key, max_tokens=160, log_label=f"{repo_name}@{tag}"
+        _RELEASE_SYSTEM_PROMPT, prompt, cache_key, max_tokens=200, log_label=f"{repo_name}@{tag}"
     )
 
 
