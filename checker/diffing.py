@@ -56,6 +56,12 @@ def filter_new_workflows(
     return [w for w in workflows_raw if w.get("id") not in known_run_ids]
 
 
+def _merge_ids(current: List, known: set, max_count: int) -> List:
+    """Merge current IDs with known ones, deduplicating and capping the result."""
+    current_set = set(current)
+    return (current + [x for x in known if x not in current_set])[:max_count]
+
+
 def build_new_state(
     all_commits: List[Dict],
     known_shas: set,
@@ -70,22 +76,14 @@ def build_new_state(
     """Build the updated per-repo state dict to persist for the next run."""
     from datetime import datetime, timezone
 
-    all_current_shas = [c.get("sha") for c in all_commits if c.get("sha")]
-    _current_sha_set = set(all_current_shas)
-    updated_shas = all_current_shas + [s for s in list(known_shas) if s not in _current_sha_set]
-
-    all_current_pr_numbers = [p["number"] for p in prs_raw]
-    _current_pr_set = set(all_current_pr_numbers)
-    updated_pr_numbers = all_current_pr_numbers + [n for n in list(known_pr_numbers) if n not in _current_pr_set]
-
-    all_current_run_ids = [w.get("id") for w in workflows_raw if w.get("id")]
-    _current_run_set = set(all_current_run_ids)
-    updated_run_ids = all_current_run_ids + [i for i in list(known_run_ids) if i not in _current_run_set]
+    current_shas    = [c.get("sha") for c in all_commits if c.get("sha")]
+    current_pr_nums = [p["number"] for p in prs_raw]
+    current_run_ids = [w.get("id") for w in workflows_raw if w.get("id")]
 
     new_state: Dict[str, Any] = {
-        "known_shas":       updated_shas[:MAX_KNOWN_SHAS],
-        "known_pr_numbers": updated_pr_numbers[:200],
-        "known_run_ids":    updated_run_ids[:200],
+        "known_shas":       _merge_ids(current_shas,    known_shas,         MAX_KNOWN_SHAS),
+        "known_pr_numbers": _merge_ids(current_pr_nums, known_pr_numbers,   200),
+        "known_run_ids":    _merge_ids(current_run_ids, known_run_ids,      200),
         "last_check":       datetime.now(timezone.utc).isoformat(),
         "stars":            info["stars"],
         "forks":            info["forks"],

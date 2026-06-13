@@ -113,10 +113,10 @@ def _save_cache() -> None:
         log.warning("Failed to save AI summary cache: %s", e)
 
 
-def _get_cached(key: str) -> Optional[str]:
+def _get_cached(key: str, ttl: int = _CACHE_TTL) -> Optional[str]:
     _load_cache()
     entry = _cache.get(key)
-    if entry and time.time() - entry[1] < _CACHE_TTL:
+    if entry and time.time() - entry[1] < ttl:
         return entry[0]
     _cache.pop(key, None)
     return None
@@ -143,6 +143,41 @@ def is_available() -> bool:
     return bool(ANTHROPIC_API_KEY and _anthropic_available)
 
 
+async def _call_claude(
+    system_prompt: str,
+    user_prompt: str,
+    cache_key: str,
+    max_tokens: int = 160,
+    ttl: int = _CACHE_TTL,
+    log_label: str = "",
+) -> Optional[str]:
+    """Shared Claude API call with cache check, result caching, and error handling."""
+    cached = _get_cached(cache_key, ttl=ttl)
+    if cached:
+        log.debug("AI cache hit%s (key=%s)", f" for {log_label}" if log_label else "", cache_key)
+        return cached
+
+    client = _get_async_client()
+    if client is None:
+        return None
+
+    try:
+        resp = await client.messages.create(
+            model=AI_MODEL,
+            max_tokens=max_tokens,
+            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        result = resp.content[0].text.strip() if resp.content else None
+        if result:
+            await _set_cached_async(cache_key, result)
+            log.info("AI summary generated%s (key=%s)", f" for {log_label}" if log_label else "", cache_key)
+        return result
+    except Exception as e:
+        log.warning("Claude API call failed%s: %s", f" for {log_label}" if log_label else "", e)
+        return None
+
+
 # ──────────────────────────────────────────────────────────────
 # SUMMARIZE COMMITS
 # ──────────────────────────────────────────────────────────────
@@ -162,11 +197,6 @@ async def summarize_commits(repo_name: str, commits: list) -> Optional[str]:
     commit_shas = "".join(c.get("sha", "")[:8] for c in commits[:5])
     cache_key = hashlib.sha256(f"{AI_MODEL}:{repo_name}:{commit_shas}".encode()).hexdigest()[:16]
 
-    cached = _get_cached(cache_key)
-    if cached:
-        log.debug("AI cache hit for %s (key=%s)", repo_name, cache_key)
-        return cached
-
     lines = [f"Репозиторий: {repo_name}", "Новые коммиты:"]
     for c in commits[:5]:
         sha = c.get("sha", "")[:7]
@@ -178,25 +208,7 @@ async def summarize_commits(repo_name: str, commits: list) -> Optional[str]:
         lines.append(line)
 
     prompt = "\n".join(lines) + "\n\nКратко на русском (1-2 предложения):"
-
-    try:
-        client = _get_async_client()
-        if client is None:
-            return None
-        resp = await client.messages.create(
-            model=AI_MODEL,
-            max_tokens=160,
-            system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": prompt}],
-        )
-        result = resp.content[0].text.strip() if resp.content else None
-        if result:
-            await _set_cached_async(cache_key, result)
-            log.info("AI summary generated for %s (key=%s)", repo_name, cache_key)
-        return result
-    except Exception as e:
-        log.warning("AI summarization failed for %s: %s", repo_name, e)
-        return None
+    return await _call_claude(_SYSTEM_PROMPT, prompt, cache_key, max_tokens=160, log_label=repo_name)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -217,10 +229,6 @@ async def summarize_release(repo_name: str, release: dict) -> Optional[str]:
         return None
 
     cache_key = hashlib.sha256(f"{AI_MODEL}:release:{repo_name}:{tag}".encode()).hexdigest()[:16]
-    cached = _get_cached(cache_key)
-    if cached:
-        log.debug("AI release cache hit for %s@%s (key=%s)", repo_name, tag, cache_key)
-        return cached
 
     name = release.get("name") or tag
     body = (release.get("body") or "").strip()[:600]
@@ -237,29 +245,13 @@ async def summarize_release(repo_name: str, release: dict) -> Optional[str]:
         lines.append(f"Файлы: {asset_names}")
 
     prompt = "\n".join(lines) + "\n\nКратко на русском (1-2 предложения):"
-
-    try:
-        client = _get_async_client()
-        if client is None:
-            return None
-        resp = await client.messages.create(
-            model=AI_MODEL,
-            max_tokens=160,
-            system=[{"type": "text", "text": _RELEASE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": prompt}],
-        )
-        result = resp.content[0].text.strip() if resp.content else None
-        if result:
-            await _set_cached_async(cache_key, result)
-            log.info("AI release summary generated for %s@%s (key=%s)", repo_name, tag, cache_key)
-        return result
-    except Exception as e:
-        log.warning("AI release summarization failed for %s@%s: %s", repo_name, tag, e)
-        return None
+    return await _call_claude(
+        _RELEASE_SYSTEM_PROMPT, prompt, cache_key, max_tokens=160, log_label=f"{repo_name}@{tag}"
+    )
 
 
 # ──────────────────────────────────────────────────────────────
-# SUMMARIZE PR BATCH  (NEW)
+# SUMMARIZE PR BATCH
 # ──────────────────────────────────────────────────────────────
 
 async def summarize_pr_batch(repo_name: str, prs: list) -> Optional[str]:
@@ -274,11 +266,6 @@ async def summarize_pr_batch(repo_name: str, prs: list) -> Optional[str]:
     pr_key = "".join(str(p.get("number", "")) for p in prs[:4])
     cache_key = hashlib.sha256(f"{AI_MODEL}:prs:{repo_name}:{pr_key}".encode()).hexdigest()[:16]
 
-    cached = _get_cached(cache_key)
-    if cached:
-        log.debug("AI PR cache hit for %s (key=%s)", repo_name, cache_key)
-        return cached
-
     lines = [f"Репозиторий: {repo_name}", "Новые открытые PR:"]
     for p in prs[:4]:
         num = p.get("number", "?")
@@ -290,30 +277,14 @@ async def summarize_pr_batch(repo_name: str, prs: list) -> Optional[str]:
         lines.append(entry)
 
     prompt = "\n".join(lines) + "\n\nОдним предложением — суть этих PR:"
-
-    try:
-        client = _get_async_client()
-        if client is None:
-            return None
-        resp = await client.messages.create(
-            model=AI_MODEL,
-            max_tokens=100,
-            system=[{"type": "text", "text": _PR_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": prompt}],
-        )
-        result = resp.content[0].text.strip() if resp.content else None
-        if result:
-            await _set_cached_async(cache_key, result)
-            log.info("AI PR summary generated for %s (key=%s)", repo_name, cache_key)
-        return result
-    except Exception as e:
-        log.warning("AI PR summarization failed for %s: %s", repo_name, e)
-        return None
+    return await _call_claude(_PR_SYSTEM_PROMPT, prompt, cache_key, max_tokens=100, log_label=repo_name)
 
 
 # ──────────────────────────────────────────────────────────────
-# SUMMARIZE WEEKLY INSIGHTS  (NEW)
+# SUMMARIZE WEEKLY INSIGHTS
 # ──────────────────────────────────────────────────────────────
+
+_WEEKLY_CACHE_TTL = 21600  # 6 hours — shorter than the default 24h
 
 async def summarize_weekly_insights(
     username: str,
@@ -335,13 +306,6 @@ async def summarize_weekly_insights(
     week_key = f"{username}:{total_repos}:{total_stars}:{total_commits_week}"
     cache_key = hashlib.sha256(f"{AI_MODEL}:weekly:{week_key}".encode()).hexdigest()[:16]
 
-    # Weekly cache TTL is shorter — 6 hours
-    _load_cache()
-    entry = _cache.get(cache_key)
-    if entry and time.time() - entry[1] < 21600:
-        log.debug("AI weekly cache hit (key=%s)", cache_key)
-        return entry[0]
-
     lines = [
         f"Проект: {username} на GitHub",
         f"Всего репозиториев: {total_repos}",
@@ -356,22 +320,6 @@ async def summarize_weekly_insights(
         lines.append(f"Достигли вех по звёздам: {', '.join(milestone_repos[:3])}")
 
     prompt = "\n".join(lines) + "\n\nКраткий аналитический вывод на русском (2-3 предложения):"
-
-    try:
-        client = _get_async_client()
-        if client is None:
-            return None
-        resp = await client.messages.create(
-            model=AI_MODEL,
-            max_tokens=200,
-            system=[{"type": "text", "text": _WEEKLY_INSIGHTS_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": prompt}],
-        )
-        result = resp.content[0].text.strip() if resp.content else None
-        if result:
-            await _set_cached_async(cache_key, result)
-            log.info("AI weekly insights generated (key=%s)", cache_key)
-        return result
-    except Exception as e:
-        log.warning("AI weekly insights failed: %s", e)
-        return None
+    return await _call_claude(
+        _WEEKLY_INSIGHTS_PROMPT, prompt, cache_key, max_tokens=200, ttl=_WEEKLY_CACHE_TTL
+    )

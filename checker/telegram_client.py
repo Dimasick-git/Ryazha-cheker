@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from .formatter import split_message
+
 TELEGRAM_API = "https://api.telegram.org"
 TELEGRAM_MAX_LENGTH = 4096
 
@@ -165,24 +167,7 @@ class TelegramClient:
 
     @staticmethod
     def _split(text: str, limit: int = TELEGRAM_MAX_LENGTH) -> List[str]:
-        """Split text into parts of at most `limit` characters, cutting on newlines."""
-        if len(text) <= limit:
-            return [text]
-
-        parts = []
-        while text:
-            if len(text) <= limit:
-                parts.append(text)
-                break
-            cut = text.rfind("\n", 0, limit)
-            if cut == -1:
-                cut = limit
-            parts.append(text[:cut])
-            text = text[cut:].lstrip("\n")
-            if not text:
-                break
-
-        return parts
+        return split_message(text, limit)
 
     @staticmethod
     def _strip_html(text: str) -> str:

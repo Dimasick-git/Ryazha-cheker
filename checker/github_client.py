@@ -358,7 +358,15 @@ class GitHubClient:
         return None
 
     async def get_open_issues_count(self, repo: str, open_issues_raw: int = -1, pr_count: int = 0) -> int:
-        """Open issue count (excluding PRs)."""
+        """Open issue count (excluding PRs).
+
+        GitHub's open_issues_count includes PRs, so subtracting pr_count gives
+        an accurate enough result without touching the Search API (rate-limited
+        to 30 req/min authenticated vs 5000/min for other endpoints).
+        """
+        if open_issues_raw >= 0:
+            return max(0, open_issues_raw - pr_count)
+        # Raw count unavailable — fall back to Search API
         data = await self._get(
             f"{GITHUB_API}/search/issues",
             params={"q": f"repo:{self.username}/{repo} type:issue state:open", "per_page": 1},
@@ -366,8 +374,6 @@ class GitHubClient:
         )
         if data and isinstance(data, dict) and "total_count" in data:
             return data["total_count"]
-        if open_issues_raw >= 0:
-            return open_issues_raw
         repo_data = await self._get(f"{GITHUB_API}/repos/{self.username}/{repo}", context=repo)
         if repo_data and isinstance(repo_data, dict):
             return repo_data.get("open_issues_count", 0)

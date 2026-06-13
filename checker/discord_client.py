@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from .formatter import split_message
+
 DISCORD_MAX_EMBED_DESC = 4096
 DISCORD_MAX_CONTENT = 2000
 
@@ -143,19 +145,4 @@ class DiscordWebhookClient:
 
     @staticmethod
     def _split(text: str, limit: int = DISCORD_MAX_CONTENT) -> List[str]:
-        """Split text into chunks of at most `limit` characters, cutting on newlines."""
-        if len(text) <= limit:
-            return [text]
-        parts = []
-        while text:
-            if len(text) <= limit:
-                parts.append(text)
-                break
-            cut = text.rfind("\n", 0, limit)
-            if cut == -1:
-                cut = limit
-            parts.append(text[:cut])
-            text = text[cut:].lstrip("\n")
-            if not text:
-                break
-        return parts
+        return split_message(text, limit)

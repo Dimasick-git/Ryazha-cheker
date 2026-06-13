@@ -112,6 +112,25 @@ def truncate(text: str, max_len: int = 60) -> str:
     return text if len(text) <= max_len else text[: max_len - 1] + "…"
 
 
+def split_message(text: str, limit: int) -> List[str]:
+    """Split text into chunks of at most `limit` characters, cutting on newlines."""
+    if len(text) <= limit:
+        return [text]
+    parts = []
+    while text:
+        if len(text) <= limit:
+            parts.append(text)
+            break
+        cut = text.rfind("\n", 0, limit)
+        if cut == -1:
+            cut = limit
+        parts.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+        if not text:
+            break
+    return parts
+
+
 def build_github_file_url(commit_url: str, filename: str, file_info: Dict[str, Any]) -> str:
     """Build a working link to a file changed by a specific commit."""
     direct_url = file_info.get("blob_url") or file_info.get("raw_url")
