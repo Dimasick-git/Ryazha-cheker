@@ -267,6 +267,9 @@ class MessageBuilder:
             if prs:
                 pr_parts = [f"#{p['number']} {escape_html(p['title'])}" for p in prs[:2]]
                 lines.append("<b>PR:</b> " + " | ".join(pr_parts))
+                pr_ai = repo.get("pr_ai_summary")
+                if pr_ai:
+                    lines.append(f"  🔀 <i>{escape_html(pr_ai)}</i>")
 
             lines.append("────────────────────")
 
@@ -312,11 +315,12 @@ class MessageBuilder:
         return "\n".join(lines)
 
     @staticmethod
-    def build_weekly(username: str, repos: List[Dict], all_states: Dict) -> str:
+    def build_weekly(username: str, repos: List[Dict], all_states: Dict, ai_insights: Optional[str] = None) -> str:
         """Build a comprehensive Weekly Digest message.
 
         ``repos`` is the full raw list of GitHub repo dicts.
         ``all_states`` is the persisted state dict.
+        ``ai_insights`` is an optional AI-generated paragraph added after the stats header.
         """
         from datetime import timedelta
 
@@ -341,6 +345,14 @@ class MessageBuilder:
             ),
             "",
         ]
+
+        # AI weekly insights (if available)
+        if ai_insights:
+            lines += [
+                "<b>AI-аналитика недели:</b>",
+                f"  💡 <i>{escape_html(ai_insights)}</i>",
+                "",
+            ]
 
         # ── Top 5 most active (by pushed_at) ──────────────────────
         lines.append("<b>Top 5 most active this week</b>")
