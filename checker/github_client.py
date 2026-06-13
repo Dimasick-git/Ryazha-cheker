@@ -301,25 +301,35 @@ class GitHubClient:
                 continue
         return result
 
-    async def get_releases(self, repo: str) -> List[Dict]:
-        """Latest release for a repository."""
+    async def get_releases(self, repo: str, count: int = MAX_RELEASES) -> List[Dict]:
+        """Recent releases for a repository (up to `count`)."""
         data = await self._get(
-            f"{GITHUB_API}/repos/{self.username}/{repo}/releases/latest",
+            f"{GITHUB_API}/repos/{self.username}/{repo}/releases",
+            params={"per_page": min(count, 10)},
             context=repo,
         )
-        if not data or not isinstance(data, dict):
+        if not data or not isinstance(data, list):
             return []
 
-        try:
-            return [{
-                "tag":          data["tag_name"],
-                "name":         truncate(data.get("name") or data["tag_name"], 50),
-                "author":       data["author"]["login"] if data.get("author") else "Unknown",
-                "published_at": data["published_at"],
-                "html_url":     data["html_url"],
-            }]
-        except (KeyError, TypeError):
-            return []
+        result = []
+        for item in data[:count]:
+            try:
+                result.append({
+                    "tag":          item["tag_name"],
+                    "name":         truncate(item.get("name") or item["tag_name"], 50),
+                    "author":       item["author"]["login"] if item.get("author") else "Unknown",
+                    "published_at": item["published_at"],
+                    "html_url":     item["html_url"],
+                    "body":         (item.get("body") or "")[:600],
+                    "assets":       [
+                        {"name": a["name"]}
+                        for a in (item.get("assets") or [])[:6]
+                        if a.get("name")
+                    ],
+                })
+            except (KeyError, TypeError):
+                continue
+        return result
 
     async def get_workflow_runs(self, repo: str, count: int = 5) -> List[Dict]:
         """Recent workflow runs for a repository."""
@@ -380,11 +390,15 @@ class GitHubClient:
         return 0
 
     async def get_new_releases(self, repo: str, known_tag: Optional[str]) -> List[Dict]:
-        """Return release if the tag has changed since the last check."""
-        releases = await self.get_releases(repo)
+        """Return all releases published after `known_tag` (or the latest on first run)."""
+        releases = await self.get_releases(repo, count=5)
         if not releases:
             return []
-        current_tag = releases[0].get("tag", "")
-        if known_tag and current_tag == known_tag:
-            return []
-        return releases
+        if not known_tag:
+            return releases[:1]
+        new = []
+        for r in releases:
+            if r.get("tag") == known_tag:
+                break
+            new.append(r)
+        return new

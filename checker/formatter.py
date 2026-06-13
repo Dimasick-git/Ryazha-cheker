@@ -273,9 +273,10 @@ class MessageBuilder:
                 author = escape_html(r.get("author", ""))
                 date   = fmt_date(r.get("published_at", ""))
                 author_str = f" by {author}" if author and author != "Unknown" else ""
+                extra = f" <i>(+{len(releases) - 1} more)</i>" if len(releases) > 1 else ""
                 lines.append(
                     f"🚀 <b>RELEASE:</b> <a href=\"{rurl}\">{tag}</a> — {rname}"
-                    f"<i>{author_str} · {date}</i>"
+                    f"<i>{author_str} · {date}</i>{extra}"
                 )
                 release_ai = r.get("ai_summary")
                 if release_ai:

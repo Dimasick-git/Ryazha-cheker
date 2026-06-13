@@ -133,6 +133,7 @@ jobs:
           G_USERNAME:           ${{ secrets.G_USERNAME }}
           TELEGRAM_TOPIC_ID:    ${{ secrets.TELEGRAM_TOPIC_ID }}
           ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
+          DISCORD_WEBHOOK_URL:  ${{ secrets.DISCORD_WEBHOOK_URL }}
           SKIP_REPOS:           ${{ vars.SKIP_REPOS }}
           FORCE_SEND:           ${{ vars.FORCE_SEND }}
           AI_MODEL:             ${{ vars.AI_MODEL }}

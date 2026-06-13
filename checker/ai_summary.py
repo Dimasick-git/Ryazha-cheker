@@ -340,7 +340,7 @@ async def summarize_weekly_insights(
         f"Проект: {username} на GitHub",
         f"Всего репозиториев: {total_repos}",
         f"Суммарно звёзд: {total_stars}",
-        f"Коммитов за неделю (оценка): {total_commits_week}",
+        f"Активных репозиториев за неделю (с пушем): {total_commits_week}",
     ]
     if top_active:
         lines.append(f"Самые активные репозитории: {', '.join(top_active[:5])}")

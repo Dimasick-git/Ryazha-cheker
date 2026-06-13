@@ -32,6 +32,13 @@ jobs:
           key: monitor-state-${{ github.ref_name }}
           restore-keys: monitor-state-
 
+      - name: Restore AI summary cache
+        uses: actions/cache@v4
+        with:
+          path: ai_summary_cache.json
+          key: ai-summary-cache-${{ github.ref_name }}
+          restore-keys: ai-summary-cache-
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -46,6 +53,7 @@ jobs:
           TELEGRAM_TOPIC_ID:    ${{ secrets.TELEGRAM_TOPIC_ID }}
           SKIP_REPOS:           ${{ vars.SKIP_REPOS }}
           ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
+          DISCORD_WEBHOOK_URL:  ${{ secrets.DISCORD_WEBHOOK_URL }}
           AI_MODEL:             ${{ vars.AI_MODEL }}
           PYTHONUNBUFFERED:     "1"
           PYTHONFAULTHANDLER:   "1"
@@ -71,6 +79,13 @@ jobs:
             last_check.json
             repo_states_*.json
           key: monitor-state-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Save AI summary cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ai_summary_cache.json
+          key: ai-summary-cache-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: Summary
         if: always()
