@@ -39,6 +39,37 @@ jobs:
           key: ai-summary-cache-${{ github.ref_name }}
           restore-keys: ai-summary-cache-
 
+      - name: Validate secrets
+        env:
+          G_TOKEN:              ${{ secrets.G_TOKEN }}
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+          G_USERNAME:           ${{ secrets.G_USERNAME }}
+        run: |
+          set -euo pipefail
+          errors=0
+          check_secret() {
+            local name="$1" value="$2" min_len="${3:-5}"
+            if [ -z "$value" ]; then
+              echo "::error::Secret '$name' is EMPTY or NOT SET"
+              return 1
+            elif [ "${#value}" -lt "$min_len" ]; then
+              echo "::error::Secret '$name' is too short (${#value} chars)"
+              return 1
+            else
+              echo "✅ $name = ${value:0:4}*** (${#value} chars)"
+            fi
+          }
+          check_secret "G_TOKEN"            "$G_TOKEN"            10 || errors=$((errors+1))
+          check_secret "TELEGRAM_BOT_TOKEN" "$TELEGRAM_BOT_TOKEN" 20 || errors=$((errors+1))
+          check_secret "TELEGRAM_CHAT_ID"   "$TELEGRAM_CHAT_ID"   5  || errors=$((errors+1))
+          check_secret "G_USERNAME"         "$G_USERNAME"         1  || errors=$((errors+1))
+          if [ "$errors" -gt 0 ]; then
+            echo "::error::$errors secret(s) failed — fix in Settings → Secrets → Actions"
+            exit 1
+          fi
+          echo "✅ All secrets validated"
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

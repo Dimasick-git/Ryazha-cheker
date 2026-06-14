@@ -1,15 +1,15 @@
-name: Weekly GitHub Digest
+name: Daily Repository Summary
 
 on:
   schedule:
-    - cron: '0 10 * * 1'  # every Monday at 10:00 UTC
+    - cron: '0 9 * * *'  # every day at 09:00 UTC
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  weekly-digest:
+  daily-summary:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -75,7 +75,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Weekly Digest
+      - name: Run Daily Summary
         env:
           G_TOKEN:              ${{ secrets.G_TOKEN }}
           TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -90,15 +90,15 @@ jobs:
           PYTHONFAULTHANDLER:   "1"
         run: |
           set -euo pipefail
-          echo "::group::Running weekly digest"
+          echo "::group::Running daily summary"
           echo "Started at: $(date -u)"
-          python3 -u main.py --weekly
+          python3 -u main.py --summary
           exit_code=$?
           echo "Finished at: $(date -u)"
           echo "Exit code: $exit_code"
           echo "::endgroup::"
           if [ $exit_code -ne 0 ]; then
-            echo "::error::main.py --weekly exited with code $exit_code"
+            echo "::error::main.py --summary exited with code $exit_code"
             exit $exit_code
           fi
 
@@ -122,12 +122,13 @@ jobs:
         if: always()
         run: |
           {
-            echo "## Weekly Digest Run"
+            echo "## 📋 Daily Summary Run"
             echo ""
-            echo "| Parameter | Value |"
-            echo "|-----------|-------|"
-            echo "| Time      | $(date -u '+%Y-%m-%d %H:%M UTC') |"
-            echo "| Trigger   | \`${{ github.event_name }}\` |"
-            echo "| Status    | ${{ job.status }} |"
-            echo "| Run       | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+            echo "| Параметр | Значение |"
+            echo "|----------|----------|"
+            echo "| Время    | $(date -u '+%Y-%m-%d %H:%M UTC') |"
+            echo "| Триггер  | \`${{ github.event_name }}\` |"
+            echo "| Статус   | ${{ job.status }} |"
+            echo "| AI       | ${{ secrets.ANTHROPIC_API_KEY != '' && 'включён' || 'выключен' }} |"
+            echo "| Run      | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
           } >> "$GITHUB_STEP_SUMMARY"
