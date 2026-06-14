@@ -56,6 +56,16 @@ def filter_new_workflows(
     return [w for w in workflows_raw if w.get("id") not in known_run_ids]
 
 
+def filter_new_issues(
+    issues_raw: List[Dict],
+    known_issue_numbers: set,
+) -> List[Dict]:
+    """Return issues whose number is not in ``known_issue_numbers``."""
+    if not known_issue_numbers:
+        return issues_raw[:1]
+    return [i for i in issues_raw if i.get("number") not in known_issue_numbers]
+
+
 def _merge_ids(current: List, known: set, max_count: int) -> List:
     """Merge current IDs with known ones, deduplicating and capping the result."""
     current_set = set(current)
@@ -72,6 +82,8 @@ def build_new_state(
     info: Dict[str, Any],
     releases: List[Dict],
     known_tag: Optional[str],
+    issues_raw: Optional[List[Dict]] = None,
+    known_issue_numbers: Optional[set] = None,
 ) -> Dict[str, Any]:
     """Build the updated per-repo state dict to persist for the next run."""
     from datetime import datetime, timezone
@@ -92,5 +104,10 @@ def build_new_state(
         new_state["latest_release_tag"] = releases[0].get("tag", known_tag)
     elif known_tag:
         new_state["latest_release_tag"] = known_tag
+
+    if issues_raw is not None:
+        current_issue_nums = [i["number"] for i in issues_raw if i.get("number")]
+        known_in = known_issue_numbers or set()
+        new_state["known_issue_numbers"] = _merge_ids(current_issue_nums, known_in, 200)
 
     return new_state

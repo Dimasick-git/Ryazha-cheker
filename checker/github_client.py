@@ -63,6 +63,8 @@ class GitHubClient:
         self._rate_remaining: int = 5000
         self._rate_reset_ts: float = 0.0
         self._rate_warned: bool = False
+        # Dynamic inter-request delay: adjusted based on remaining quota and reset window.
+        self._dynamic_delay: float = API_DELAY
 
     def _cb_is_open(self, context: str = "") -> bool:
         """Return True when the circuit breaker for `context` is open."""
@@ -122,6 +124,15 @@ class GitHubClient:
             )
         elif self._rate_remaining > self._RATE_WARN_THRESHOLD:
             self._rate_warned = False
+
+        # Dynamically adjust inter-request pacing to spread remaining quota across reset window.
+        if self._rate_remaining > 0 and self._rate_reset_ts > 0:
+            reset_window = max(1.0, self._rate_reset_ts - time.time())
+            pace = reset_window / self._rate_remaining
+            # Clamp between the configured minimum and 5 seconds.
+            self._dynamic_delay = max(API_DELAY, min(pace, 5.0))
+        else:
+            self._dynamic_delay = API_DELAY
 
     async def _proactive_rate_pause(self) -> None:
         """If remaining calls are critically low, sleep until the reset window."""
@@ -227,7 +238,7 @@ class GitHubClient:
             if len(data) < 100:
                 break
             page += 1
-            await asyncio.sleep(API_DELAY)
+            await asyncio.sleep(self._dynamic_delay)
 
         return all_repos
 
@@ -388,6 +399,33 @@ class GitHubClient:
         if repo_data and isinstance(repo_data, dict):
             return repo_data.get("open_issues_count", 0)
         return 0
+
+    async def get_recent_issues(self, repo: str, count: int = 5) -> List[Dict]:
+        """Fetch recently opened issues (excluding pull requests)."""
+        data = await self._get(
+            f"{GITHUB_API}/repos/{self.username}/{repo}/issues",
+            params={"state": "open", "sort": "created", "direction": "desc", "per_page": count},
+            context=repo,
+        )
+        if not data or not isinstance(data, list):
+            return []
+
+        result = []
+        for issue in data[:count]:
+            try:
+                if issue.get("pull_request"):
+                    continue
+                result.append({
+                    "number": issue["number"],
+                    "title":  truncate(issue["title"], 60),
+                    "author": issue["user"]["login"],
+                    "date":   issue["created_at"],
+                    "url":    issue["html_url"],
+                    "labels": [la["name"] for la in (issue.get("labels") or [])[:3]],
+                })
+            except (KeyError, TypeError):
+                continue
+        return result
 
     async def get_new_releases(self, repo: str, known_tag: Optional[str]) -> List[Dict]:
         """Return all releases published after `known_tag` (or the latest on first run)."""
