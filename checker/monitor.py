@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 from .diffing import (
     compute_deltas,
     filter_new_commits,
+    filter_new_issues,
     filter_new_prs,
     filter_new_workflows,
     build_new_state,
@@ -303,12 +304,22 @@ class GitHubMonitor:
                 log.warning("[%s] AI PR summary error: %s", name, exc)
         await asyncio.sleep(API_DELAY)
 
-        # Issues
+        # Issues: open count + new issue tracking
         info["open_issues"] = await self.github.get_open_issues_count(
             name,
             open_issues_raw=repo.get("open_issues_count", 0),
             pr_count=len(prs_raw),
         )
+
+        issues_raw = await self.github.get_recent_issues(name, count=5)
+        known_issue_numbers = set(old_state.get("known_issue_numbers", []))
+        new_issues = filter_new_issues(issues_raw, known_issue_numbers)
+        if self.since_date:
+            new_issues = [i for i in new_issues if self._is_after_since(i.get("date", ""))]
+        info["new_issues"] = new_issues
+        if new_issues:
+            log.info("[%s] new issues: %d", name, len(new_issues))
+        await asyncio.sleep(API_DELAY)
 
         # Releases — only if the tag changed
         known_tag = old_state.get("latest_release_tag")
@@ -354,10 +365,12 @@ class GitHubMonitor:
             info=info,
             releases=releases,
             known_tag=known_tag,
+            issues_raw=issues_raw,
+            known_issue_numbers=known_issue_numbers,
         )
 
         include_in_report = bool(
-            new_commits or new_prs or releases
+            new_commits or new_prs or releases or new_issues
             or star_delta or fork_delta or info.get("star_milestones")
         )
 

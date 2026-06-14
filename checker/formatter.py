@@ -329,6 +329,15 @@ class MessageBuilder:
                 if pr_ai:
                     lines.append(f"  🔀 <i>{escape_html(pr_ai)}</i>")
 
+            # New issues
+            new_issues = repo.get("new_issues", [])
+            if new_issues:
+                issue_parts = [
+                    f"<a href='{escape_html(i['url'])}'>#{i['number']}</a> {escape_html(i['title'])}"
+                    for i in new_issues[:2]
+                ]
+                lines.append("🐛 <b>Issues:</b> " + " | ".join(issue_parts))
+
             lines.append("────────────────────")
 
         reply_markup = {"inline_keyboard": buttons} if buttons else None
