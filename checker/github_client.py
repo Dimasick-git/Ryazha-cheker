@@ -5,7 +5,7 @@ import logging
 import os
 import random
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -63,6 +63,8 @@ class GitHubClient:
         self._rate_remaining: int = 5000
         self._rate_reset_ts: float = 0.0
         self._rate_warned: bool = False
+        # Dynamic inter-request delay, adjusted based on X-RateLimit headers.
+        self.delay: float = API_DELAY
 
     def _cb_is_open(self, context: str = "") -> bool:
         """Return True when the circuit breaker for `context` is open."""
@@ -210,6 +212,31 @@ class GitHubClient:
                 return None
         self._cb_record_failure(context)
         return None
+
+    async def _get_with_headers(self, url: str) -> Tuple[Any, dict]:
+        """Like _get() but also returns response headers for rate-limit inspection."""
+        await asyncio.sleep(self.delay)
+        async with self._client.get(url) as resp:
+            resp.raise_for_status()
+            data = resp.json()
+            return data, dict(resp.headers)
+
+    def _update_delay_from_headers(self, headers: dict) -> None:
+        """Dynamically adjust inter-request delay based on X-RateLimit headers."""
+        try:
+            remaining = int(headers.get("X-RateLimit-Remaining", 60))
+            reset_ts = int(headers.get("X-RateLimit-Reset", 0))
+            now = int(__import__("time").time())
+            window = max(reset_ts - now, 1)
+            if remaining < 10:
+                # Critical: space requests to survive until reset
+                self.delay = max(self.delay, window / max(remaining, 1))
+            elif remaining < 30:
+                self.delay = max(API_DELAY, window / max(remaining * 2, 1))
+            else:
+                self.delay = API_DELAY  # back to normal
+        except (ValueError, TypeError):
+            pass
 
     async def get_repositories(self) -> List[Dict]:
         """All user repositories with pagination."""
@@ -402,3 +429,25 @@ class GitHubClient:
                 break
             new.append(r)
         return new
+
+    async def get_recent_issues(self, repo: str, max_count: int = 10) -> List[Dict]:
+        """Fetch the most recent open issues (excluding pull requests)."""
+        url = f"{GITHUB_API}/repos/{self.username}/{repo}/issues?state=open&per_page={max_count}&sort=created&direction=desc"
+        try:
+            data, headers = await self._get_with_headers(url)
+        except Exception as exc:
+            log.warning("[%s] get_recent_issues error: %s", repo, exc)
+            return []
+        # Update dynamic delay from rate limit headers
+        self._update_delay_from_headers(headers)
+        issues = []
+        for item in (data or []):
+            if "pull_request" in item:
+                continue  # skip PRs (they appear in issues endpoint too)
+            issues.append({
+                "number":     item["number"],
+                "title":      item["title"],
+                "url":        item["html_url"],
+                "created_at": item.get("created_at", ""),
+            })
+        return issues
