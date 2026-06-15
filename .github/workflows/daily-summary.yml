@@ -1,0 +1,46 @@
+name: Daily summary
+
+on:
+  schedule:
+    - cron: '0 9 * * *'   # 09:00 UTC every day
+  workflow_dispatch: {}
+
+jobs:
+  summary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate secrets
+        run: |
+          missing=()
+          [[ -z "$TELEGRAM_BOT_TOKEN" ]] && missing+=("TELEGRAM_BOT_TOKEN")
+          [[ -z "$TELEGRAM_CHAT_ID" ]]   && missing+=("TELEGRAM_CHAT_ID")
+          [[ -z "$GITHUB_CHECK_TOKEN" ]] && missing+=("GITHUB_CHECK_TOKEN")
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "::error::Missing required secrets: ${missing[*]}"
+            exit 1
+          fi
+          echo "All required secrets present."
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_CHECK_TOKEN: ${{ secrets.G_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run daily summary
+        run: python main.py --summary
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_CHECK_TOKEN: ${{ secrets.G_TOKEN }}
+          G_TOKEN:            ${{ secrets.G_TOKEN }}
+          G_USERNAME:         ${{ secrets.G_USERNAME }}
