@@ -19,6 +19,7 @@ from .diffing import (
     filter_new_commits,
     filter_new_prs,
     filter_new_workflows,
+    filter_new_issues,
     build_new_state,
 )
 from .formatter import escape_html, language_icon, MessageBuilder
@@ -218,7 +219,7 @@ class GitHubMonitor:
             all_states[rname]["forks"] = r.get("forks_count", 0)
         save_all_repository_states(self.username, all_states)
 
-    async def _collect_repo_data(self, repo: Dict, old_state: Dict) -> Dict[str, Any]:
+    async def _collect_repo_data(self, repo: Dict, old_state: Dict, is_cold_start: bool = False) -> Dict[str, Any]:
         """Perform all per-repo API calls and return collected data + new state."""
         name = repo["name"]
 
@@ -236,6 +237,7 @@ class GitHubMonitor:
             "releases":       [],
             "workflow_runs":  [],
             "open_issues":    0,
+            "new_issues":     [],
             "star_delta":     0,
             "fork_delta":     0,
             "pr_ai_summary":  None,
@@ -303,12 +305,22 @@ class GitHubMonitor:
                 log.warning("[%s] AI PR summary error: %s", name, exc)
         await asyncio.sleep(API_DELAY)
 
-        # Issues
+        # Issues (count + new issue tracking)
         info["open_issues"] = await self.github.get_open_issues_count(
             name,
             open_issues_raw=repo.get("open_issues_count", 0),
             pr_count=len(prs_raw),
         )
+
+        # Fetch recent open issues and detect new ones
+        current_issues = await self.github.get_recent_issues(name)
+        known_issue_numbers = set(old_state.get("known_issue_numbers", []))
+        issue_cold_start = not bool(known_issue_numbers)
+        new_issues = filter_new_issues(current_issues, known_issue_numbers, cold_start=issue_cold_start or is_cold_start)
+        info["new_issues"] = new_issues
+        if new_issues:
+            log.info("[%s] new issues: %d", name, len(new_issues))
+        await asyncio.sleep(API_DELAY)
 
         # Releases — only if the tag changed
         known_tag = old_state.get("latest_release_tag")
@@ -354,10 +366,12 @@ class GitHubMonitor:
             info=info,
             releases=releases,
             known_tag=known_tag,
+            current_issues=current_issues,
+            old_state=old_state,
         )
 
         include_in_report = bool(
-            new_commits or new_prs or releases
+            new_commits or new_prs or new_issues or releases
             or star_delta or fork_delta or info.get("star_milestones")
         )
 
@@ -603,7 +617,10 @@ class GitHubMonitor:
         async def _worker(repo: Dict):
             old_state = all_states.get(repo["name"], {})
             # Apply timeout inside the task so cancellation actually reaches _collect_repo_data
-            result = await asyncio.wait_for(self._collect_repo_data(repo, old_state), timeout=300)
+            result = await asyncio.wait_for(
+                self._collect_repo_data(repo, old_state, is_cold_start=is_cold_start),
+                timeout=300,
+            )
             return repo["name"], result
 
         tasks = [asyncio.create_task(_worker(repo)) for repo in repositories]
@@ -659,8 +676,23 @@ class GitHubMonitor:
 
         repos_data.sort(key=lambda x: x.get("pushed_at", ""), reverse=True)
 
+        # Append new issues section to message if any
+        all_new_issues = []
+        for rd in repos_data:
+            for issue in rd.get("new_issues", []):
+                all_new_issues.append((rd["name"], issue))
+
         log.info("Building message...")
         message, markup = MessageBuilder.build(self.username, repos_data)
+
+        if all_new_issues:
+            issues_lines = ["", "🐛 <b>Новые issues:</b>"]
+            for repo_name, issue in all_new_issues:
+                title = escape_html(issue["title"])
+                url = issue["url"]
+                issues_lines.append(f'  • #{issue["number"]} <a href="{url}">{title}</a>')
+            message = message + "\n".join(issues_lines)
+
         log.info("Message length: %d chars", len(message))
 
         if self.dry_run:
