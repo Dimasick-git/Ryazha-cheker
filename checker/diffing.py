@@ -56,6 +56,18 @@ def filter_new_workflows(
     return [w for w in workflows_raw if w.get("id") not in known_run_ids]
 
 
+def filter_new_issues(
+    current_issues: List[Dict],
+    known_numbers: set,
+    cold_start: bool,
+) -> List[Dict]:
+    """Return issues not in known_numbers. On cold start, report at most 1."""
+    new = [i for i in current_issues if i["number"] not in known_numbers]
+    if cold_start and len(new) > 1:
+        new = new[:1]
+    return new
+
+
 def _merge_ids(current: List, known: set, max_count: int) -> List:
     """Merge current IDs with known ones, deduplicating and capping the result."""
     current_set = set(current)
@@ -72,6 +84,8 @@ def build_new_state(
     info: Dict[str, Any],
     releases: List[Dict],
     known_tag: Optional[str],
+    current_issues: Optional[List[Dict]] = None,
+    old_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the updated per-repo state dict to persist for the next run."""
     from datetime import datetime, timezone
@@ -92,5 +106,10 @@ def build_new_state(
         new_state["latest_release_tag"] = releases[0].get("tag", known_tag)
     elif known_tag:
         new_state["latest_release_tag"] = known_tag
+
+    # Persist known issue numbers
+    old_known_issue_numbers = set((old_state or {}).get("known_issue_numbers", []))
+    current_issue_nums = {i["number"] for i in (current_issues or [])}
+    new_state["known_issue_numbers"] = list(old_known_issue_numbers | current_issue_nums)
 
     return new_state
