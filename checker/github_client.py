@@ -216,10 +216,10 @@ class GitHubClient:
     async def _get_with_headers(self, url: str) -> Tuple[Any, dict]:
         """Like _get() but also returns response headers for rate-limit inspection."""
         await asyncio.sleep(self.delay)
-        async with self._client.get(url) as resp:
-            resp.raise_for_status()
-            data = resp.json()
-            return data, dict(resp.headers)
+        async with self._api_semaphore:
+            resp = await self._client.get(url)
+        resp.raise_for_status()
+        return resp.json(), dict(resp.headers)
 
     def _update_delay_from_headers(self, headers: dict) -> None:
         """Dynamically adjust inter-request delay based on X-RateLimit headers."""
@@ -432,22 +432,20 @@ class GitHubClient:
 
     async def get_recent_issues(self, repo: str, max_count: int = 10) -> List[Dict]:
         """Fetch the most recent open issues (excluding pull requests)."""
-        url = f"{GITHUB_API}/repos/{self.username}/{repo}/issues?state=open&per_page={max_count}&sort=created&direction=desc"
-        try:
-            data, headers = await self._get_with_headers(url)
-        except Exception as exc:
-            log.warning("[%s] get_recent_issues error: %s", repo, exc)
+        data = await self._get(
+            f"{GITHUB_API}/repos/{self.username}/{repo}/issues",
+            params={"state": "open", "per_page": max_count, "sort": "created", "direction": "desc"},
+            context=repo,
+        )
+        if not data or not isinstance(data, list):
             return []
-        # Update dynamic delay from rate limit headers
-        self._update_delay_from_headers(headers)
-        issues = []
-        for item in (data or []):
-            if "pull_request" in item:
-                continue  # skip PRs (they appear in issues endpoint too)
-            issues.append({
+        return [
+            {
                 "number":     item["number"],
                 "title":      item["title"],
                 "url":        item["html_url"],
                 "created_at": item.get("created_at", ""),
-            })
-        return issues
+            }
+            for item in data
+            if "pull_request" not in item
+        ]
