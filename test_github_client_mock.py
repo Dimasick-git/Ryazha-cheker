@@ -194,7 +194,7 @@ class TestGetReleases:
             "html_url": "https://github.com/testuser/repo/releases/tag/v1.2.3",
         }
         with patch.object(client, "_get", new_callable=AsyncMock) as mock_get:
-            mock_get.return_value = raw
+            mock_get.return_value = [raw]
             result = asyncio.run(client.get_releases("myrepo"))
         assert len(result) == 1
         assert result[0]["tag"] == "v1.2.3"
