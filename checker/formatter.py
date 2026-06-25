@@ -1,7 +1,7 @@
 """Message formatting utilities: HTML helpers, emoji icons, and MessageBuilder."""
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
@@ -77,37 +77,43 @@ def workflow_icon(conclusion: Optional[str], status: str) -> str:
 # HTML HELPERS
 # ──────────────────────────────────────────────────────────────
 
+# Conventional-commit prefix → emoji (checked once at import time, not per call)
+_COMMIT_PREFIXES: List[tuple] = [
+    (("feat(", "feat:"),         "✨"),
+    (("fix(", "fix:"),           "🐛"),
+    (("perf(", "perf:"),         "⚡"),
+    (("refactor(", "refactor:"), "♻️"),
+    (("docs(", "docs:"),         "📝"),
+    (("chore(", "chore:"),       "🔧"),
+    (("build(", "build:"),       "🏗️"),
+    (("ci(", "ci:"),             "⚙️"),
+    (("test(", "test:"),         "🧪"),
+    (("release(", "release:"),   "🚀"),
+    (("style(", "style:"),       "💄"),
+]
+
+# Heuristic keyword → emoji for non-conventional-commit messages
+_COMMIT_KEYWORDS: List[tuple] = [
+    ("add", "✨"), ("new", "✨"), ("добав", "✨"), ("введ", "✨"),
+    ("fix", "🐛"), ("bug", "🐛"), ("исправ", "🐛"), ("патч", "🐛"),
+    ("update", "📦"), ("bump", "📦"), ("обновл", "📦"), ("upgrade", "📦"),
+    ("remove", "🗑️"), ("delete", "🗑️"), ("удал", "🗑️"),
+    ("refactor", "♻️"), ("clean", "♻️"), ("рефакт", "♻️"),
+    ("optim", "⚡"), ("perf", "⚡"), ("speed", "⚡"), ("оптим", "⚡"),
+    ("release", "🚀"), ("version", "🚀"), ("релиз", "🚀"),
+    ("docs", "📝"), ("readme", "📝"), ("документ", "📝"),
+    ("ci", "⚙️"), ("workflow", "⚙️"), ("actions", "⚙️"),
+]
+
+
 def classify_commit(message: str) -> str:
     """Detect conventional-commit type and return an emoji prefix."""
     lower = message.lower().lstrip()
-    _PREFIXES = [
-        (("feat(", "feat:"),         "✨"),
-        (("fix(", "fix:"),           "🐛"),
-        (("perf(", "perf:"),         "⚡"),
-        (("refactor(", "refactor:"), "♻️"),
-        (("docs(", "docs:"),         "📝"),
-        (("chore(", "chore:"),       "🔧"),
-        (("build(", "build:"),       "🏗️"),
-        (("ci(", "ci:"),             "⚙️"),
-        (("test(", "test:"),         "🧪"),
-        (("release(", "release:"),   "🚀"),
-        (("style(", "style:"),       "💄"),
-    ]
-    for prefixes, emoji in _PREFIXES:
+    for prefixes, emoji in _COMMIT_PREFIXES:
         if any(lower.startswith(p) for p in prefixes):
             return emoji
     # Heuristic fallback for non-conventional commits
-    for kw, emoji in (
-        ("add", "✨"), ("new", "✨"), ("добав", "✨"), ("введ", "✨"),
-        ("fix", "🐛"), ("bug", "🐛"), ("исправ", "🐛"), ("патч", "🐛"),
-        ("update", "📦"), ("bump", "📦"), ("обновл", "📦"), ("upgrade", "📦"),
-        ("remove", "🗑️"), ("delete", "🗑️"), ("удал", "🗑️"),
-        ("refactor", "♻️"), ("clean", "♻️"), ("рефакт", "♻️"),
-        ("optim", "⚡"), ("perf", "⚡"), ("speed", "⚡"), ("оптим", "⚡"),
-        ("release", "🚀"), ("version", "🚀"), ("релиз", "🚀"),
-        ("docs", "📝"), ("readme", "📝"), ("документ", "📝"),
-        ("ci", "⚙️"), ("workflow", "⚙️"), ("actions", "⚙️"),
-    ):
+    for kw, emoji in _COMMIT_KEYWORDS:
         if kw in lower:
             return emoji
     return "🔹"
@@ -380,8 +386,6 @@ class MessageBuilder:
         ``all_states`` is the persisted state dict.
         ``ai_insights`` is an optional AI-generated paragraph added after the stats header.
         """
-        from datetime import timedelta
-
         now = datetime.now(timezone.utc)
         now_str = now.strftime("%d.%m.%Y %H:%M UTC")
         week_ago = now - timedelta(days=7)
